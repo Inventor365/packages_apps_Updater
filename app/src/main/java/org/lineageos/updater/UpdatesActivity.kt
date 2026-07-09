@@ -105,37 +105,37 @@ class UpdatesActivity : ComponentActivity(), UpdateImporter.Callbacks {
                         else -> state.changelog
                     }
                 )
-            }
 
-            LaunchedEffect(state.showImportDialog) {
-                if (state.showImportDialog) {
-                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                } else {
-                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                }
-            }
-            if (state.showImportDialog) ImportProgressDialog(
-                onDismiss = { viewModel.dismissImport(); mUpdateImporter?.stopImport() }
-            )
-            if (state.showPreferencesDialog) PreferencesDialog(
-                onDismiss = { viewModel.dismissPreferences() },
-                onSave = { viewModel.savePreferences(it) }
-            )
-            if (state.showWelcomeDialog) WelcomeDialog(
-                onDismiss = { viewModel.dismissWelcome(); maybeShowNotificationPermissionPrompt() }
-            )
-            state.importSuccessUpdate?.let { update ->
-                ImportSuccessDialog(
-                    update = update,
-                    onInstall = {
-                        viewModel.getUpdatesList()
-                        Utils.triggerUpdate(this, update.downloadId)
-                        viewModel.clearImportSuccess()
-                    },
-                    onCancel = {
-                        viewModel.deleteImportedUpdate(update.downloadId)
+                LaunchedEffect(state.showImportDialog) {
+                    if (state.showImportDialog) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     }
+                }
+                if (state.showImportDialog) ImportProgressDialog(
+                    onDismiss = { viewModel.dismissImport(); mUpdateImporter?.stopImport() }
                 )
+                if (state.showPreferencesDialog) PreferencesDialog(
+                    onDismiss = { viewModel.dismissPreferences() },
+                    onSave = { viewModel.savePreferences(it) }
+                )
+                if (state.showWelcomeDialog) WelcomeDialog(
+                    onDismiss = { viewModel.dismissWelcome(); maybeShowNotificationPermissionPrompt() }
+                )
+                state.importSuccessUpdate?.let { update ->
+                    ImportSuccessDialog(
+                        update = update,
+                        onInstall = {
+                            viewModel.getUpdatesList()
+                            Utils.triggerUpdate(this, update.downloadId)
+                            viewModel.clearImportSuccess()
+                        },
+                        onCancel = {
+                            viewModel.deleteImportedUpdate(update.downloadId)
+                        }
+                    )
+                }
             }
             state.toastMessage?.let {
                 LaunchedEffect(it) {

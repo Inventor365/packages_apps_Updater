@@ -208,6 +208,12 @@ class ABUpdateInstaller {
             }
         }
 
+        try {
+            mUpdateEngine.resetStatus();
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to reset UpdateEngine status", e);
+        }
+
         boolean enableABPerfMode = PreferenceManager.getDefaultSharedPreferences(mContext)
                 .getBoolean(Constants.PREF_AB_PERF_MODE, false);
 
@@ -223,7 +229,11 @@ class ABUpdateInstaller {
                 mUpdaterController.notifyUpdateChange(mDownloadId);
                 return;
             }
-            throw e;
+            Log.e(TAG, "Failed to apply payload", e);
+            mUpdaterController.getActualUpdate(mDownloadId)
+                    .setStatus(UpdateStatus.INSTALLATION_FAILED);
+            mUpdaterController.notifyUpdateChange(mDownloadId);
+            return;
         }
 
         mUpdaterController.getActualUpdate(mDownloadId).setStatus(UpdateStatus.INSTALLING);
