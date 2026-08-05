@@ -18,13 +18,17 @@ import java.util.concurrent.TimeUnit
 class UpdatesNetworkDataSource(private val context: Context) {
     private val serverUrl: String
         get() {
-            val hasGMS = SystemProperties.getBoolean("persist.sys.with_google_apps", false)
-            val urlResId = if (hasGMS) {
-                R.string.updater_server_url
-            } else {
-                R.string.updater_server_url_vanilla
+            var base = SystemProperties.get("lunaris.updater.uri")
+            if (base.isEmpty()) {
+                val hasGMS = SystemProperties.getBoolean("with_google_apps", false) ||
+                        SystemProperties.getBoolean("persist.sys.with_google_apps", false)
+                val urlResId = if (hasGMS) {
+                    R.string.updater_server_url
+                } else {
+                    R.string.updater_server_url_vanilla
+                }
+                base = context.getString(urlResId)
             }
-            val base = context.getString(urlResId)
             require(base.startsWith("https://")) {
                 "Update server URL must use HTTPS: $base"
             }
