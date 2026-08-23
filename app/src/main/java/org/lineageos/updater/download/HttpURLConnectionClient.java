@@ -258,6 +258,27 @@ public class HttpURLConnectionClient implements DownloadClient {
                     URL currentUrl = mClient.getURL();
                     URL nextUrl = new URL(currentUrl, location);
                     Log.d(TAG, "Following redirect (" + responseCode + ") to " + nextUrl);
+
+                    if (org.lineageos.updater.util.SourceForgeMirrorUtils.INSTANCE.isSourceForgeDirectMirrorUrl(nextUrl)) {
+                        List<URL> candidates = org.lineageos.updater.util.SourceForgeMirrorUtils.INSTANCE.getMirrorCandidateUrls(nextUrl);
+                        for (URL candidate : candidates) {
+                            try {
+                                changeClientUrl(candidate);
+                                mClient.setInstanceFollowRedirects(false);
+                                mClient.connect();
+                                int mirrorCode = mClient.getResponseCode();
+                                if (isSuccessCode(mirrorCode) || isPartialContentCode(mirrorCode)) {
+                                    Log.d(TAG, "Successfully connected to fast SourceForge mirror: " + candidate.getHost());
+                                    return mirrorCode;
+                                } else {
+                                    Log.d(TAG, "Mirror " + candidate.getHost() + " replied with " + mirrorCode + ", trying next mirror");
+                                }
+                            } catch (IOException e) {
+                                Log.w(TAG, "Failed connecting to mirror " + candidate.getHost(), e);
+                            }
+                        }
+                    }
+
                     changeClientUrl(nextUrl);
                     redirectCount++;
                     continue;
