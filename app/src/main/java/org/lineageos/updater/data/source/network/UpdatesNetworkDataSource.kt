@@ -1,17 +1,21 @@
 /*
  * SPDX-FileCopyrightText: The LineageOS Project
  * SPDX-FileCopyrightText: crDroid Android Project
+ * SPDX-FileCopyrightText: Lunaris AOSP Project
  * SPDX-License-Identifier: Apache-2.0
  */
+
 package org.lineageos.updater.data.source.network
 
 import android.content.Context
 import android.os.SystemProperties
-import kotlinx.serialization.json.Json
+import android.util.Log
+import okhttp3.CacheControl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.lineageos.updater.R
 import org.lineageos.updater.deviceinfo.DeviceInfoUtils
+import org.lineageos.updater.util.UpdateParser
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
@@ -19,6 +23,9 @@ class UpdatesNetworkDataSource(private val context: Context) {
     private val serverUrl: String
         get() {
             var base = SystemProperties.get("lunaris.updater.uri")
+            if (base.isEmpty()) {
+                base = SystemProperties.get("lineage.updater.uri")
+            }
             if (base.isEmpty()) {
                 val hasGMS = SystemProperties.getBoolean("with_google_apps", false) ||
                         SystemProperties.getBoolean("persist.sys.with_google_apps", false)
@@ -29,33 +36,48 @@ class UpdatesNetworkDataSource(private val context: Context) {
                 }
                 base = context.getString(urlResId)
             }
-            require(base.startsWith("https://")) {
-                "Update server URL must use HTTPS: $base"
+            base = base.trim()
+            require(base.startsWith("https://") || base.startsWith("http://")) {
+                "Update server URL must use HTTP/HTTPS: $base"
             }
-            return base
-                .replace("{device}", DeviceInfoUtils.device)
+            return base.replace("{device}", DeviceInfoUtils.device)
         }
 
     private val client = OkHttpClient.Builder()
-        .callTimeout(10, TimeUnit.SECONDS)
-        .followRedirects(false)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .retryOnConnectionFailure(true)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    private val json = Json { ignoreUnknownKeys = true }
-
     fun fetchUpdates(): List<NetworkUpdate> {
+        val targetUrl = UpdateParser.prepareTargetUrl(serverUrl)
+        Log.d(TAG, "Fetching updates from: $targetUrl")
+
         val request = Request.Builder()
-            .url(serverUrl)
+            .url(targetUrl)
+            .cacheControl(CacheControl.Builder().noCache().noStore().build())
+            .header("Cache-Control", "no-cache, no-store, max-age=0")
+            .header("Pragma", "no-cache")
+            .header("User-Agent", "LunarisUpdater/1.0 (Android ${DeviceInfoUtils.androidVersion}; ${DeviceInfoUtils.device})")
             .build()
 
         val responseBody = client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                throw IOException("Unexpected HTTP status: ${response.code}")
+                throw IOException("Unexpected HTTP status: ${response.code} for URL: $targetUrl")
             }
 
-            response.body?.string() ?: throw IOException("Empty response body")
+            response.body?.string() ?: throw IOException("Empty response body from $targetUrl")
         }
 
-        return json.decodeFromString<NetworkUpdateResponse>(responseBody).response
+        val updates = UpdateParser.parseUpdates(responseBody)
+        Log.d(TAG, "Parsed ${updates.size} updates from response")
+        return updates
+    }
+
+    companion object {
+        private const val TAG = "UpdatesNetworkDataSource"
     }
 }

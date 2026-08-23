@@ -194,15 +194,15 @@ class UpdateActionHandler(
                 )
             )
 
-            UpdateActionType.VIEW_DOWNLOADS -> activity.startActivity(
-                Intent(
-                    Intent.ACTION_VIEW,
-                    activity.getString(
-                        R.string.menu_downloads_url,
-                        DeviceInfoUtils.device,
-                    ).toUri(),
+            UpdateActionType.VIEW_DOWNLOADS -> {
+                val rawUrl = activity.getString(R.string.menu_downloads_url)
+                val url = rawUrl
+                    .replace("{device}", DeviceInfoUtils.device)
+                    .replace("%1\$s", DeviceInfoUtils.device)
+                activity.startActivity(
+                    Intent(Intent.ACTION_VIEW, url.toUri())
                 )
-            )
+            }
 
             UpdateActionType.REBOOT ->
                 activity.getSystemService(PowerManager::class.java).reboot(null)

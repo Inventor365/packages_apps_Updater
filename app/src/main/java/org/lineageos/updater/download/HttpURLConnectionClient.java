@@ -1,5 +1,6 @@
 /*
  * SPDX-FileCopyrightText: The LineageOS Project
+ * SPDX-FileCopyrightText: Lunaris AOSP Project
  * SPDX-License-Identifier: Apache-2.0
  */
 package org.lineageos.updater.download;
@@ -27,6 +28,9 @@ public class HttpURLConnectionClient implements DownloadClient {
 
     // Ref: mozilla-mobile/firefox-android AbstractFetchDownloadService.CHUNK_SIZE
     private static final int CHUNK_SIZE = 32 * 1024;
+    private static final int MAX_REDIRECTS = 10;
+    private static final int CONNECT_TIMEOUT_MS = 15000;
+    private static final int READ_TIMEOUT_MS = 30000;
 
     private HttpURLConnection mClient;
 
@@ -42,7 +46,6 @@ public class HttpURLConnectionClient implements DownloadClient {
         public String get(String name) {
             return mClient.getHeaderField(name);
         }
-
     }
 
     HttpURLConnectionClient(String url, File destination,
@@ -50,10 +53,17 @@ public class HttpURLConnectionClient implements DownloadClient {
             DownloadClient.DownloadCallback callback,
             boolean useDuplicateLinks) throws IOException {
         mClient = (HttpURLConnection) new URL(url).openConnection();
+        setupDefaultConnectionProperties(mClient);
         mDestination = destination;
         mProgressListener = progressListener;
         mCallback = callback;
         mUseDuplicateLinks = useDuplicateLinks;
+    }
+
+    private static void setupDefaultConnectionProperties(HttpURLConnection connection) {
+        connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+        connection.setReadTimeout(READ_TIMEOUT_MS);
+        connection.setRequestProperty("User-Agent", "LunarisUpdater/1.0");
     }
 
     @Override
@@ -136,15 +146,9 @@ public class HttpURLConnectionClient implements DownloadClient {
         private void calculateSpeed(boolean justResumed) {
             final long millis = SystemClock.elapsedRealtime();
             if (justResumed) {
-                // If we don't start over with these after resumption, we get huge numbers for
-                // ETA since the delta will grow, resulting in a very low speed
                 mLastMillis = millis;
-                mSpeed = -1; // we don't want the moving avg with values from who knows when
-                mLastEta = -1; // reset smoothed ETA so the first post-resume value is accepted as-is
-
-                // need to do this as well, otherwise the second time we call calculateSpeed(),
-                // the difference (mTotalBytesRead - mCurSampleBytes) will be larger than expected,
-                // resulting in a higher speed calculation
+                mSpeed = -1;
+                mLastEta = -1;
                 mCurSampleBytes = mTotalBytesRead;
                 return;
             }
@@ -162,21 +166,15 @@ public class HttpURLConnectionClient implements DownloadClient {
             }
         }
 
-        // Ref: mozilla-central DownloadsCommon.sys.mjs smoothSeconds()
         private void calculateEta() {
             if (mSpeed <= 0) return;
 
             double rawSeconds = (double) (mTotalBytes - mTotalBytesRead) / mSpeed;
 
-            // Apply smoothing only when the new value is more than half the previous;
-            // large drops (e.g. after resume) are accepted immediately.
             if (mLastEta >= 0 && rawSeconds > mLastEta / 2) {
                 double diff = rawSeconds - mLastEta;
-                // Asymmetric: trust 30% of a decrease, only 10% of an increase.
                 rawSeconds = mLastEta + (diff < 0 ? 0.3 : 0.1) * diff;
 
-                // If the change is tiny (< 5 s or < 5%), nudge by a small amount
-                // so the display shows forward progress rather than freezing.
                 diff = rawSeconds - mLastEta;
                 double diffPct = (diff / mLastEta) * 100;
                 if (Math.abs(diff) < 5 || Math.abs(diffPct) < 5) {
@@ -184,7 +182,6 @@ public class HttpURLConnectionClient implements DownloadClient {
                 }
             }
 
-            // Never show zero seconds while still downloading.
             mLastEta = Math.max(rawSeconds, 1.0);
             mEta = (long) mLastEta;
         }
@@ -193,32 +190,24 @@ public class HttpURLConnectionClient implements DownloadClient {
             String range = mClient.getRequestProperty("Range");
             mClient.disconnect();
             mClient = (HttpURLConnection) newUrl.openConnection();
+            setupDefaultConnectionProperties(mClient);
             if (range != null) {
                 mClient.setRequestProperty("Range", range);
             }
         }
 
-        private void handleDuplicateLinks() throws IOException {
-            String protocol = mClient.getURL().getProtocol();
-
-            class DuplicateLink {
-                private final String mUrl;
-                private final int mPriority;
-                private DuplicateLink(String url, int priority) {
-                    mUrl = url;
-                    mPriority = priority;
-                }
+        private static class DuplicateLink {
+            final String mUrl;
+            final int mPriority;
+            DuplicateLink(String url, int priority) {
+                mUrl = url;
+                mPriority = priority;
             }
+        }
 
-            PriorityQueue<DuplicateLink> duplicates = null;
-
+        private void collectDuplicateLinks(PriorityQueue<DuplicateLink> duplicates) {
             for (Map.Entry<String, List<String>> entry : mClient.getHeaderFields().entrySet()) {
-                if ("Link".equalsIgnoreCase((entry.getKey()))) {
-                    duplicates = new PriorityQueue<>(entry.getValue().size(),
-                            Comparator.comparingInt(d -> d.mPriority));
-
-                    // https://tools.ietf.org/html/rfc6249
-                    // https://tools.ietf.org/html/rfc5988#section-5
+                if ("Link".equalsIgnoreCase(entry.getKey())) {
                     String regex = "(?i)<([^>]+)>\\s*;\\s*rel=duplicate(?:.*pri=([0-9]+).*|.*)?";
                     Pattern pattern = Pattern.compile(regex);
                     for (String field : entry.getValue()) {
@@ -229,42 +218,62 @@ public class HttpURLConnectionClient implements DownloadClient {
                             int priority = pri != null ? Integer.parseInt(pri) : 999999;
                             duplicates.add(new DuplicateLink(url, priority));
                             Log.d(TAG, "Adding duplicate link " + url);
-                        } else {
-                            Log.d(TAG, "Ignoring link " + field);
                         }
                     }
                 }
             }
+        }
 
-            String newUrl = mClient.getHeaderField("Location");
-            for (;;) {
-                try {
-                    URL url = new URL(newUrl);
-                    if (!url.getProtocol().equals(protocol)) {
-                        // If we hadn't handled duplicate links, we wouldn't have
-                        // used this url.
-                        throw new IOException("Protocol changes are not allowed");
-                    }
-                    Log.d(TAG, "Downloading from " + newUrl);
-                    changeClientUrl(url);
-                    mClient.setConnectTimeout(5000);
-                    mClient.connect();
-                    if (!isSuccessCode(mClient.getResponseCode())) {
-                        throw new IOException("Server replied with " + mClient.getResponseCode());
-                    }
-                    return;
-                } catch (IOException e) {
-                    if (duplicates != null && !duplicates.isEmpty()) {
-                        DuplicateLink link = duplicates.poll();
-                        if (link != null) {
-                            duplicates.remove(link);
-                            newUrl = link.mUrl;
-                            Log.e(TAG, "Using duplicate link " + link.mUrl, e);
+        private int followRedirectsAndDuplicates() throws IOException {
+            PriorityQueue<DuplicateLink> duplicates = new PriorityQueue<>(
+                    Comparator.comparingInt(d -> d.mPriority));
+
+            int redirectCount = 0;
+            while (true) {
+                mClient.setInstanceFollowRedirects(false);
+                mClient.connect();
+                int responseCode = mClient.getResponseCode();
+
+                if (mUseDuplicateLinks) {
+                    collectDuplicateLinks(duplicates);
+                }
+
+                if (isRedirectCode(responseCode)) {
+                    if (redirectCount >= MAX_REDIRECTS) {
+                        if (!duplicates.isEmpty()) {
+                            DuplicateLink fallback = duplicates.poll();
+                            Log.w(TAG, "Exceeded redirects, falling back to duplicate link: " + fallback.mUrl);
+                            changeClientUrl(new URL(fallback.mUrl));
+                            redirectCount = 0;
+                            continue;
                         }
-                    } else {
-                        throw e;
+                        throw new IOException("Too many redirects: " + redirectCount);
+                    }
+
+                    String location = mClient.getHeaderField("Location");
+                    if (location == null || location.isEmpty()) {
+                        throw new IOException("Redirect with missing Location header");
+                    }
+
+                    URL currentUrl = mClient.getURL();
+                    URL nextUrl = new URL(currentUrl, location);
+                    Log.d(TAG, "Following redirect (" + responseCode + ") to " + nextUrl);
+                    changeClientUrl(nextUrl);
+                    redirectCount++;
+                    continue;
+                }
+
+                if (!isSuccessCode(responseCode) && !isPartialContentCode(responseCode)) {
+                    if (!duplicates.isEmpty()) {
+                        DuplicateLink fallback = duplicates.poll();
+                        Log.w(TAG, "Server replied with " + responseCode + ", trying duplicate link: " + fallback.mUrl);
+                        changeClientUrl(new URL(fallback.mUrl));
+                        redirectCount = 0;
+                        continue;
                     }
                 }
+
+                return responseCode;
             }
         }
 
@@ -272,14 +281,7 @@ public class HttpURLConnectionClient implements DownloadClient {
         public void run() {
             boolean justResumed = false;
             try {
-                mClient.setInstanceFollowRedirects(!mUseDuplicateLinks);
-                mClient.connect();
-                int responseCode = mClient.getResponseCode();
-
-                if (mUseDuplicateLinks && isRedirectCode(responseCode)) {
-                    handleDuplicateLinks();
-                    responseCode = mClient.getResponseCode();
-                }
+                int responseCode = followRedirectsAndDuplicates();
 
                 mCallback.onResponse(new Headers());
 
@@ -305,7 +307,7 @@ public class HttpURLConnectionClient implements DownloadClient {
                         mTotalBytesRead += count;
                         calculateSpeed(justResumed);
                         calculateEta();
-                        justResumed = false; // otherwise we will never get speed and ETA again
+                        justResumed = false;
                         if (mProgressListener != null) {
                             mProgressListener.update(mTotalBytesRead, mTotalBytes, mSpeed, mEta);
                         }

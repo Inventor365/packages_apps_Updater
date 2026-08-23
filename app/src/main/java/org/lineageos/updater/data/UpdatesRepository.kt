@@ -1,5 +1,6 @@
 /*
  * SPDX-FileCopyrightText: The LineageOS Project
+ * SPDX-FileCopyrightText: Lunaris AOSP Project
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -19,6 +20,7 @@ import org.lineageos.updater.data.source.network.toUpdate
 import org.lineageos.updater.deviceinfo.DeviceInfoUtils
 import org.lineageos.updater.notifications.NotificationHelper
 import org.lineageos.updater.util.NetworkMonitor
+import org.lineageos.updater.util.VersionUtils
 import java.io.IOException
 
 private const val TAG = "UpdatesRepository"
@@ -69,7 +71,7 @@ class UpdatesRepository(
         )
 
         val networkUpdates = networkUpdatesRaw
-            .map { it.toUpdate() }
+            .map { it.toUpdate(fallbackSdkLevel = DeviceInfoUtils.sdkLevel) }
             .filter { filterUpdates(it) }
 
         if (networkUpdates.isEmpty()) return System.currentTimeMillis()
@@ -111,18 +113,66 @@ class UpdatesRepository(
     }
 
     private fun filterUpdates(update: Update): Boolean {
-        val isCurrentBuild = update.timestamp == DeviceInfoUtils.buildDateTimestamp
-        val isOlderBuild = update.timestamp < DeviceInfoUtils.buildDateTimestamp
+        if (DeviceInfoUtils.isDowngradingAllowed) {
+            return true
+        }
 
-        if (!DeviceInfoUtils.isDowngradingAllowed && (isOlderBuild || isCurrentBuild)) {
-            Log.d(TAG, "${update.name} is not newer than the current build")
+        val currentVersion = DeviceInfoUtils.buildVersion
+        val currentTimestamp = DeviceInfoUtils.buildDateTimestamp
+
+        val hasCurrentVersion = currentVersion.isNotBlank()
+        val hasUpdateVersion = update.version.isNotBlank()
+
+        val isNewerVer = hasCurrentVersion && hasUpdateVersion &&
+                VersionUtils.isNewer(update.version, currentVersion)
+        val isOlderVer = hasCurrentVersion && hasUpdateVersion &&
+                VersionUtils.isOlder(update.version, currentVersion)
+        val isSameVer = hasCurrentVersion && hasUpdateVersion &&
+                VersionUtils.isSame(update.version, currentVersion)
+
+        val hasCurrentTime = currentTimestamp > 0
+        val hasUpdateTime = update.timestamp > 0
+
+        val isNewerTime = hasCurrentTime && hasUpdateTime && update.timestamp > currentTimestamp
+        val isOlderTime = hasCurrentTime && hasUpdateTime && update.timestamp < currentTimestamp
+        val isSameTime = hasCurrentTime && hasUpdateTime && update.timestamp == currentTimestamp
+
+        // Same version and same timestamp -> current running build
+        if (isSameVer && isSameTime) {
+            Log.d(TAG, "${update.name} is the current build (version=$currentVersion, timestamp=$currentTimestamp)")
             return false
         }
 
-        if (update.osSdkLevel < DeviceInfoUtils.sdkLevel) {
-            Log.d(TAG, "${update.name} is older than current Android version")
+        // If version is newer (e.g. 3.12.1 vs 3.12, or 3.13 vs 3.12) -> accept
+        if (isNewerVer) {
+            Log.d(TAG, "${update.name} is a newer version: ${update.version} > $currentVersion")
+            return true
+        }
+
+        // If timestamp is newer -> accept
+        if (isNewerTime) {
+            Log.d(TAG, "${update.name} has newer timestamp: ${update.timestamp} > $currentTimestamp")
+            return true
+        }
+
+        // If version is older and timestamp is not strictly newer -> reject
+        if (isOlderVer && !isNewerTime) {
+            Log.d(TAG, "${update.name} is older version: ${update.version} < $currentVersion")
             return false
         }
+
+        // If timestamp is older and version is not strictly newer -> reject
+        if (isOlderTime && !isNewerVer) {
+            Log.d(TAG, "${update.name} is older build timestamp: ${update.timestamp} < $currentTimestamp")
+            return false
+        }
+
+        // If Android SDK level is explicitly lower than current SDK level and not newer -> reject
+        if (update.osSdkLevel in 1 until DeviceInfoUtils.sdkLevel && !isNewerVer && !isNewerTime) {
+            Log.d(TAG, "${update.name} has older Android SDK level: ${update.osSdkLevel} < ${DeviceInfoUtils.sdkLevel}")
+            return false
+        }
+
         return true
     }
 }

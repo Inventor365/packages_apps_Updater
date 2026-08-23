@@ -44,7 +44,10 @@ fun DeviceInfoActionButtons(modifier: Modifier = Modifier) {
             Icons.AutoMirrored.Rounded.Article,
             Modifier.weight(1f),
         ) {
-            val url = context.getString(R.string.menu_changelog_url, DeviceInfoUtils.device)
+            val rawUrl = context.getString(R.string.menu_changelog_url)
+            val url = rawUrl
+                .replace("{device}", DeviceInfoUtils.device)
+                .replace("%1\$s", DeviceInfoUtils.device)
             context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
         }
         InfoAction(

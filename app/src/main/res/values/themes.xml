@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     SPDX-FileCopyrightText: The LineageOS Project
+     SPDX-License-Identifier: Apache-2.0
+-->
+<resources>
+    <style name="Theme.SpaLib" parent="@android:style/Theme.DeviceDefault.Settings" />
+    <style name="Theme.Material3Expressive.DayNight" parent="@android:style/Theme.DeviceDefault.Settings" />
+    <attr name="indicatorColor" format="color" />
+</resources>

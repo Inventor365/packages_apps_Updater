@@ -1,5 +1,6 @@
 /*
  * SPDX-FileCopyrightText: The LineageOS Project
+ * SPDX-FileCopyrightText: Lunaris AOSP Project
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -15,7 +16,12 @@ import java.util.concurrent.TimeUnit
 class SingleRangeHttpFetcher(private val url: String) {
 
     private val client = OkHttpClient.Builder()
-        .callTimeout(10, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .retryOnConnectionFailure(true)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(30, TimeUnit.SECONDS)
         .build()
 
     @Throws(IOException::class)
@@ -24,6 +30,7 @@ class SingleRangeHttpFetcher(private val url: String) {
         val request = Request.Builder()
             .url(url)
             .header("Range", "bytes=$offset-$endOffset")
+            .header("User-Agent", "LunarisUpdater/1.0")
             .build()
 
         client.newCall(request).execute().use { response ->
