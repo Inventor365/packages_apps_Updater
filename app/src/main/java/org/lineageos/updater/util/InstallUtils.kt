@@ -1,5 +1,6 @@
 /*
  * SPDX-FileCopyrightText: The LineageOS Project
+ * SPDX-FileCopyrightText: Lunaris AOSP Project
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -22,15 +23,41 @@ object InstallUtils {
     }
 
     @JvmStatic
-    fun getBlockedReason(update: Update) = when {
-        !DeviceInfoUtils.isDowngradingAllowed &&
-                (update.timestamp < DeviceInfoUtils.buildDateTimestamp ||
-                        update.osSdkLevel < DeviceInfoUtils.sdkLevel) -> BlockedReason.DOWNGRADE
+    fun getBlockedReason(update: Update): BlockedReason {
+        if (DeviceInfoUtils.isDowngradingAllowed) {
+            return BlockedReason.NONE
+        }
 
-        !DeviceInfoUtils.isMajorUpdateAllowed &&
-                update.osSdkLevel > DeviceInfoUtils.sdkLevel -> BlockedReason.VERSION_UNSUPPORTED
+        val currentVersion = DeviceInfoUtils.buildVersion
+        val currentTimestamp = DeviceInfoUtils.buildDateTimestamp
 
-        else -> BlockedReason.NONE
+        val hasCurrentVersion = currentVersion.isNotBlank()
+        val hasUpdateVersion = update.version.isNotBlank()
+
+        val isNewerVer = hasCurrentVersion && hasUpdateVersion &&
+                VersionUtils.isNewer(update.version, currentVersion)
+        val isOlderVer = hasCurrentVersion && hasUpdateVersion &&
+                VersionUtils.isOlder(update.version, currentVersion)
+
+        val hasCurrentTime = currentTimestamp > 0
+        val hasUpdateTime = update.timestamp > 0
+
+        val isNewerTime = hasCurrentTime && hasUpdateTime && update.timestamp > currentTimestamp
+        val isOlderTime = hasCurrentTime && hasUpdateTime && update.timestamp < currentTimestamp
+
+        val isSdkDowngrade = update.osSdkLevel in 1 until DeviceInfoUtils.sdkLevel && !isNewerVer && !isNewerTime
+        val isDowngrade = (isOlderVer && !isNewerTime) || (isOlderTime && !isNewerVer) || isSdkDowngrade
+
+        if (isDowngrade) {
+            return BlockedReason.DOWNGRADE
+        }
+
+        // Allow major Android and ROM version upgrades unless explicitly blocked by property
+        if (!DeviceInfoUtils.isMajorUpdateAllowed && update.osSdkLevel > DeviceInfoUtils.sdkLevel) {
+            return BlockedReason.VERSION_UNSUPPORTED
+        }
+
+        return BlockedReason.NONE
     }
 
     @JvmStatic

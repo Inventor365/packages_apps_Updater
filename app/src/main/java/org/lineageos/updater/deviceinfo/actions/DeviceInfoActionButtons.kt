@@ -52,7 +52,10 @@ fun DeviceInfoActionButtons(modifier: Modifier = Modifier) {
         )
         TextButton(
             onClick = {
-                val url = context.getString(R.string.menu_changelog_url, DeviceInfoUtils.device)
+                val rawUrl = context.getString(R.string.menu_changelog_url)
+                val url = rawUrl
+                    .replace("{device}", DeviceInfoUtils.device)
+                    .replace("%1\$s", DeviceInfoUtils.device)
                 val intent = Intent(Intent.ACTION_VIEW, url.toUri())
                 context.startActivity(intent)
             },

@@ -50,6 +50,10 @@ android {
         }
     }
 
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     buildFeatures {
         buildConfig = true
         compose = true
@@ -111,6 +115,10 @@ dependencies {
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.serialization.json)
+    testImplementation("org.json:json:20240303")
 
     annotationProcessor(libs.androidx.room.compiler)
 }
