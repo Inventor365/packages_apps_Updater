@@ -11,3 +11,7 @@
 .cxx
 *.jks
 local.properties
+*.apk
+*.zip
+/flashable_zip/
+.opencode/
