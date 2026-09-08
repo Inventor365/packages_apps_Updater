@@ -260,7 +260,7 @@ public class UpdaterController {
             if (entry != null) {
                 Update update = entry.mUpdate;
                 File file = update.getFile();
-                if (file.exists() && verifyPackage(file)) {
+                if (file.exists() && verifyPackage(file, update)) {
                     file.setReadable(true, false);
                     synchronized (entry) {
                         entry.mUpdate = entry.mUpdate.withStatus(UpdateStatus.VERIFIED);
@@ -281,19 +281,17 @@ public class UpdaterController {
         }).start();
     }
 
-    private boolean verifyPackage(File file) {
-        try {
-            android.os.RecoverySystem.verifyPackage(file, null, null);
-            Log.e(TAG, "Verification successful");
+    private boolean verifyPackage(File file, Update update) {
+        String expectedHash = update != null ? update.getDownloadId() : null;
+        boolean verified = org.lineageos.updater.util.FileUtils.verifyPackageIntegrity(file, expectedHash);
+        if (verified) {
+            Log.d(TAG, "Package verified successfully (corruption & hash check): " + file.getName());
             return true;
-        } catch (Exception e) {
-            Log.e(TAG, "Verification failed", e);
-            if (file.exists()) {
+        } else {
+            Log.e(TAG, "Package verification failed: " + file.getName());
+            if (update != null && !Update.LOCAL_ID.equals(update.getDownloadId()) && file.exists()) {
                 //noinspection ResultOfMethodCallIgnored
                 file.delete();
-            } else {
-                // The download was probably stopped. Exit silently
-                Log.e(TAG, "Error while verifying the file", e);
             }
             return false;
         }

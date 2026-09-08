@@ -4,7 +4,7 @@
      SPDX-License-Identifier: Apache-2.0
 -->
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="app_name">Uuendaja</string>
+    <string name="app_name">Yuki\'s Lunaris Updater</string>
     <string name="installation_suspended_notification">Installimine peatati</string>
     <string name="text_download_speed">%1$s, %2$s/s</string>
     <string name="dialog_battery_low_title">Madal akutase</string>

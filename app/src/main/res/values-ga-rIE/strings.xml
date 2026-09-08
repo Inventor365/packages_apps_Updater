@@ -4,8 +4,8 @@
      SPDX-License-Identifier: Apache-2.0
 -->
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="app_name">Nuashonróir</string>
-    <string name="display_name">Nuashonruithe córais</string>
+    <string name="app_name">Yuki\'s Lunaris Updater</string>
+    <string name="display_name">Yuki\'s Lunaris Updater</string>
     <string name="verification_failed_notification">Theip ar an bhfíorú</string>
     <string name="verifying_download_notification">Nuashonrú á fhíorú</string>
     <string name="downloading_notification">Ag íosluchtú</string>

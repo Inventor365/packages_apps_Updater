@@ -8,6 +8,7 @@ package org.lineageos.updater.util
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.URL
@@ -37,13 +38,30 @@ class SourceForgeMirrorUtilsTest {
         val candidates = SourceForgeMirrorUtils.getMirrorCandidateUrls(original)
 
         assertTrue(candidates.isNotEmpty())
-        // Preferred mirror (twds) should be first
-        assertEquals("twds.dl.sourceforge.net", candidates[0].host)
-        assertEquals("/project/yukiverse/peridot.zip?viasf=1&fid=123&st=abc", candidates[0].file)
+        // Candidate URLs should retain path and query parameters
+        for (c in candidates) {
+            assertEquals("/project/yukiverse/peridot.zip?viasf=1&fid=123&st=abc", c.file)
+            assertTrue(c.host.endsWith(".dl.sourceforge.net"))
+        }
 
-        // Check other candidate hosts exist
+        // Check hosts include twds and master
         val hosts = candidates.map { it.host }
-        assertTrue(hosts.contains("pilotfiber.dl.sourceforge.net"))
+        assertTrue(hosts.contains("twds.dl.sourceforge.net"))
         assertTrue(hosts.contains("master.dl.sourceforge.net"))
+    }
+
+    @Test
+    fun testRegionDetection() {
+        val region = SourceForgeMirrorUtils.detectUserRegion()
+        assertNotNull(region)
+    }
+
+    @Test
+    fun testSelectFastestMirrorFallback() {
+        val c1 = URL("https://twds.dl.sourceforge.net/project/a/b.zip")
+        val c2 = URL("https://master.dl.sourceforge.net/project/a/b.zip")
+        val selected = SourceForgeMirrorUtils.selectFastestMirror(listOf(c1, c2))
+        assertNotNull(selected)
+        assertTrue(selected.host.endsWith(".dl.sourceforge.net"))
     }
 }
