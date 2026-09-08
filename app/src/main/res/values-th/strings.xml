@@ -4,7 +4,7 @@
      SPDX-License-Identifier: Apache-2.0
 -->
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="app_name">อัปเดต</string>
+    <string name="app_name">Yuki\'s Lunaris Updater</string>
     <string name="verification_failed_notification">การยืนยันล้มเหลว</string>
     <string name="verifying_download_notification">กำลังตรวจสอบการอัปเดต</string>
     <string name="downloading_notification">กำลังดาวน์โหลด</string>

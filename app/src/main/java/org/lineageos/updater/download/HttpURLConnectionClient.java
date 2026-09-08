@@ -261,7 +261,16 @@ public class HttpURLConnectionClient implements DownloadClient {
 
                     if (org.lineageos.updater.util.SourceForgeMirrorUtils.INSTANCE.isSourceForgeDirectMirrorUrl(nextUrl)) {
                         List<URL> candidates = org.lineageos.updater.util.SourceForgeMirrorUtils.INSTANCE.getMirrorCandidateUrls(nextUrl);
-                        for (URL candidate : candidates) {
+                        URL fastest = org.lineageos.updater.util.SourceForgeMirrorUtils.INSTANCE.selectFastestMirror(candidates);
+                        List<URL> prioritized = new java.util.ArrayList<>();
+                        prioritized.add(fastest);
+                        for (URL c : candidates) {
+                            if (!prioritized.contains(c)) {
+                                prioritized.add(c);
+                            }
+                        }
+
+                        for (URL candidate : prioritized) {
                             try {
                                 changeClientUrl(candidate);
                                 mClient.setInstanceFollowRedirects(false);

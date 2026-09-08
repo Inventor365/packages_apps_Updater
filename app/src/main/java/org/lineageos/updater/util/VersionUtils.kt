@@ -129,6 +129,28 @@ object VersionUtils {
         return regex.find(filename)?.groupValues?.getOrNull(1)
     }
 
+    /**
+     * Extracts unix timestamp from a filename if date format YYYYMMDD or YYYYMMDDhh is present.
+     * e.g. "Lunaris-AOSP-peridot-Community-3.12-GMS-2026070503.zip" -> unix timestamp for 2026-07-05 03:00:00 UTC
+     */
+    fun extractTimestampFromFilename(filename: String): Long? {
+        if (filename.isBlank()) return null
+        val match = Regex("""(?:^|[-_])(20\d{6,8})(?:[-_.]|$)""").find(filename) ?: return null
+        val dateStr = match.groupValues[1]
+        return try {
+            val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
+            val year = dateStr.substring(0, 4).toInt()
+            val month = dateStr.substring(4, 6).toInt() - 1
+            val day = dateStr.substring(6, 8).toInt()
+            val hour = if (dateStr.length >= 10) dateStr.substring(8, 10).toInt() else 0
+            cal.set(year, month, day, hour, 0, 0)
+            cal.set(java.util.Calendar.MILLISECOND, 0)
+            cal.timeInMillis / 1000L
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private sealed interface Token : Comparable<Token> {
         data class Number(val value: Long) : Token {
             override fun compareTo(other: Token): Int = when (other) {

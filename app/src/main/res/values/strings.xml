@@ -4,11 +4,11 @@
      SPDX-License-Identifier: Apache-2.0
 -->
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="app_name">Updater</string>
+    <string name="app_name">Yuki\'s Lunaris Updater</string>
 
     <!-- This is matched with system_update_settings_list_item_title
          from the Settings app. -->
-    <string name="display_name">System updates</string>
+    <string name="display_name">Yuki\'s Lunaris Updater</string>
 
     <!-- Directory where the update files will be downloaded and stored.
          WARNING: The application can and will delete any unknown file. -->
