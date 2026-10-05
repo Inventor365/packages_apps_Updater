@@ -20,6 +20,26 @@ class UpdatesLocalDataSource(private val updateDao: UpdateDao) {
         updateDao.insertOrReplace(update.toEntity())
     }
 
+    /**
+     * Inserts a server-advertised update, or refreshes its server metadata if it is already
+     * known, without touching the locally owned download state (status and path).
+     */
+    fun upsertServerMetadata(update: Update) {
+        if (updateDao.insertIfAbsent(update.toEntity()) == -1L) {
+            updateDao.updateServerMetadata(
+                downloadId = update.downloadId,
+                downloadUrl = update.downloadUrl,
+                name = update.name,
+                size = update.fileSize,
+                timestamp = update.timestamp,
+                type = update.type,
+                version = update.version,
+                osPatchLevel = update.osPatchLevel,
+                osSdkLevel = update.osSdkLevel,
+            )
+        }
+    }
+
     fun removeUpdate(downloadId: String) = updateDao.delete(downloadId)
 
     fun changeStatus(downloadId: String, status: UpdateStatus) =

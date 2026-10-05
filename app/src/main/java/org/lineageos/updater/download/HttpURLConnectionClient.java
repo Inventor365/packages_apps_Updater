@@ -19,6 +19,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -32,7 +33,11 @@ public class HttpURLConnectionClient implements DownloadClient {
     private static final int CONNECT_TIMEOUT_MS = 15000;
     private static final int READ_TIMEOUT_MS = 30000;
 
-    private HttpURLConnection mClient;
+    // Only one thread may write a given destination at a time. A resumed download waits here
+    // for the previous (cancelled) writer to exit before measuring the file for its Range.
+    private static final Map<String, Thread> sWriters = new ConcurrentHashMap<>();
+
+    private volatile HttpURLConnection mClient;
 
     private final File mDestination;
     private final DownloadClient.ProgressListener mProgressListener;
@@ -64,6 +69,8 @@ public class HttpURLConnectionClient implements DownloadClient {
         connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
         connection.setReadTimeout(READ_TIMEOUT_MS);
         connection.setRequestProperty("User-Agent", "LunarisUpdater/1.0");
+        // Transparent gzip would strip Content-Length and break byte ranges for resuming.
+        connection.setRequestProperty("Accept-Encoding", "identity");
     }
 
     @Override
@@ -92,6 +99,10 @@ public class HttpURLConnectionClient implements DownloadClient {
         }
         mDownloadThread.interrupt();
         mDownloadThread = null;
+        // Unblock a read stuck on the socket. Closing a TLS socket may touch the network,
+        // so don't do it on the caller's (UI) thread.
+        final HttpURLConnection client = mClient;
+        new Thread(client::disconnect, "UpdaterDownloadCancel").start();
     }
 
     private void downloadFileResumeInternal() {
@@ -99,8 +110,7 @@ public class HttpURLConnectionClient implements DownloadClient {
             mCallback.onFailure(false);
             return;
         }
-        long offset = mDestination.length();
-        mClient.setRequestProperty("Range", "bytes=" + offset + "-");
+        // The Range offset is taken by the download thread once it owns the destination.
         downloadFileInternalCommon(true);
     }
 
@@ -309,15 +319,39 @@ public class HttpURLConnectionClient implements DownloadClient {
 
         @Override
         public void run() {
+            final String destinationKey = mDestination.getAbsolutePath();
+            final Thread previousWriter = sWriters.put(destinationKey, this);
             boolean justResumed = false;
             try {
+                if (previousWriter != null) {
+                    Log.d(TAG, "Waiting for previous writer of " + mDestination.getName());
+                    previousWriter.join();
+                }
+
+                long offset = 0;
+                if (mResume) {
+                    offset = mDestination.length();
+                    mClient.setRequestProperty("Range", "bytes=" + offset + "-");
+                }
+
                 int responseCode = followRedirectsAndDuplicates();
+                if (isInterrupted()) {
+                    // Paused or cancelled while resolving redirects/mirrors
+                    mCallback.onFailure(true);
+                    return;
+                }
+
+                final long contentLength = mClient.getContentLengthLong();
+                Log.i(TAG, "Downloading " + mDestination.getName() + " from "
+                        + mClient.getURL().getHost() + mClient.getURL().getPath()
+                        + ": code=" + responseCode + " contentLength=" + contentLength
+                        + " offset=" + offset);
 
                 mCallback.onResponse(new Headers());
 
                 if (mResume && isPartialContentCode(responseCode)) {
                     justResumed = true;
-                    mTotalBytesRead = mDestination.length();
+                    mTotalBytesRead = offset;
                     Log.d(TAG, "The server fulfilled the partial content request");
                 } else if (mResume || !isSuccessCode(responseCode)) {
                     Log.e(TAG, "The server replied with code " + responseCode);
@@ -329,7 +363,7 @@ public class HttpURLConnectionClient implements DownloadClient {
                         InputStream inputStream = mClient.getInputStream();
                         OutputStream outputStream = new FileOutputStream(mDestination, mResume)
                 ) {
-                    mTotalBytes = mClient.getContentLengthLong() + mTotalBytesRead;
+                    mTotalBytes = contentLength >= 0 ? contentLength + mTotalBytesRead : -1;
                     byte[] b = new byte[CHUNK_SIZE];
                     int count;
                     while (!isInterrupted() && (count = inputStream.read(b)) > 0) {
@@ -350,14 +384,25 @@ public class HttpURLConnectionClient implements DownloadClient {
 
                     if (isInterrupted()) {
                         mCallback.onFailure(true);
+                    } else if (mTotalBytes >= 0 && mTotalBytesRead != mTotalBytes) {
+                        // End of stream is not completion: never hand a short file to
+                        // verification. The partial file stays on disk for resuming.
+                        throw new IOException("Stream ended after " + mTotalBytesRead
+                                + " of " + mTotalBytes + " bytes");
                     } else {
+                        Log.i(TAG, "Downloaded " + mTotalBytesRead + " bytes to "
+                                + mDestination);
                         mCallback.onSuccess();
                     }
                 }
             } catch (IOException e) {
                 Log.e(TAG, "Error downloading file", e);
                 mCallback.onFailure(isInterrupted());
+            } catch (InterruptedException e) {
+                Log.d(TAG, "Cancelled while waiting for previous writer");
+                mCallback.onFailure(true);
             } finally {
+                sWriters.remove(destinationKey, this);
                 mClient.disconnect();
             }
         }

@@ -180,8 +180,13 @@ object SourceForgeMirrorUtils {
                     return result.first
                 }
             }
+        } catch (e: InterruptedException) {
+            // The caller is the download thread; a pause/cancel must survive the probe,
+            // otherwise the cancelled download keeps writing the package file.
+            Thread.currentThread().interrupt()
+            Log.w(TAG, "Mirror probe interrupted, using location priority")
         } catch (e: Exception) {
-            Log.w(TAG, "Mirror probe interrupted or failed, using location priority", e)
+            Log.w(TAG, "Mirror probe failed, using location priority", e)
         } finally {
             executor.shutdownNow()
         }

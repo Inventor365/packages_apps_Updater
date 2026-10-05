@@ -173,7 +173,13 @@ class UpdateItemStateMapper(
                 R.string.list_build_version,
                 update.version,
             ),
-            status = state.titleRes?.let { context.getString(it) } ?: "",
+            status = when (val failure = update.verificationFailure) {
+                null -> state.titleRes?.let { context.getString(it) } ?: ""
+                else -> context.getString(
+                    R.string.verification_failed_reason,
+                    context.getString(failure.messageRes),
+                )
+            },
             fileSize = Formatter.formatShortFileSize(context, update.fileSize),
             androidUpdateInfo = when {
                 update.osSdkLevel > DeviceInfoUtils.sdkLevel ->

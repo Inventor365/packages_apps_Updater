@@ -87,17 +87,11 @@ class UpdatesRepository(
         }
 
         withContext(Dispatchers.IO) {
-            // Merge local state into each network update and upsert into the DB.
+            // Upsert server metadata only. Status and path belong to UpdaterController, which
+            // may be writing them right now (a download starting or finishing); a whole-row
+            // replace here would race with it and could drop the path of a downloaded package.
             // Room's observeUpdates() Flow will emit automatically if anything changed.
-            networkUpdates.forEach { networkUpdate ->
-                val local = localUpdates[networkUpdate.downloadId]
-                val update = if (local != null && local.status.persistentStatus > 0) {
-                    networkUpdate.copy(status = local.status, file = local.file)
-                } else {
-                    networkUpdate
-                }
-                localDataSource.addUpdate(update)
-            }
+            networkUpdates.forEach { localDataSource.upsertServerMetadata(it) }
 
             // Delete temp files and DB entries for updates no longer advertised by the server.
             localUpdates.values.filter {

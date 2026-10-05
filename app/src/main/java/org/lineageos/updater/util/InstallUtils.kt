@@ -24,8 +24,24 @@ object InstallUtils {
 
     @JvmStatic
     fun getBlockedReason(update: Update): BlockedReason {
-        if (DeviceInfoUtils.isDowngradingAllowed || update.downloadId == Update.LOCAL_ID) {
+        if (DeviceInfoUtils.isDowngradingAllowed) {
             return BlockedReason.NONE
+        }
+
+        if (update.downloadId == Update.LOCAL_ID) {
+            // Imported packages have no server version, only their OTA metadata. Gate them the
+            // way update_engine will: it refuses payloads older than the running build.
+            return when {
+                update.timestamp < DeviceInfoUtils.buildDateTimestamp ||
+                        update.osSdkLevel in 1 until DeviceInfoUtils.sdkLevel ->
+                    BlockedReason.DOWNGRADE
+
+                !DeviceInfoUtils.isMajorUpdateAllowed &&
+                        update.osSdkLevel > DeviceInfoUtils.sdkLevel ->
+                    BlockedReason.VERSION_UNSUPPORTED
+
+                else -> BlockedReason.NONE
+            }
         }
 
         val currentVersion = DeviceInfoUtils.buildVersion

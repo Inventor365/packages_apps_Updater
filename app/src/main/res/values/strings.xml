@@ -27,6 +27,15 @@
 
     <string name="verification_failed_notification">Verification failed</string>
     <string name="verifying_download_notification">Verifying update</string>
+    <string name="verification_failed_reason">Verification failed: <xliff:g id="reason" example="Download is incomplete">%1$s</xliff:g></string>
+    <string name="verification_error_import">Couldn\'t copy the selected file</string>
+    <string name="verification_error_missing">Update package is missing</string>
+    <string name="verification_error_incomplete">Download is incomplete</string>
+    <string name="verification_error_corrupt">Not a valid update package</string>
+    <string name="verification_error_hash">Checksum doesn\'t match the update server</string>
+    <string name="verification_error_untrusted_key">Signed with a key this build doesn\'t trust</string>
+    <string name="verification_error_signature">Package signature is invalid</string>
+    <string name="verification_error_interrupted">Verification was interrupted</string>
     <string name="downloading_notification">Downloading</string>
     <string name="download_paused_notification">Download paused</string>
     <string name="download_paused_error_notification">Download error</string>
@@ -189,6 +198,7 @@
     <string name="local_update_import_success_title">Update imported</string>
     <string name="local_update_import_success_message">Build date: <xliff:g id="build_date" example="Apr 27">%1$s</xliff:g>\n\nTap the imported update to view available actions.</string>
     <string name="local_update_import_failure">Failed to import local update</string>
+    <string name="local_update_import_busy">A local update is already being imported or installed</string>
     <string name="local_update_name">Local update</string>
 
     <!-- Updater -->

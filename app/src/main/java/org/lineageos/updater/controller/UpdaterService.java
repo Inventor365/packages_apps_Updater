@@ -4,6 +4,7 @@
  */
 package org.lineageos.updater.controller;
 
+import android.app.ForegroundServiceStartNotAllowedException;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
@@ -97,6 +98,10 @@ public class UpdaterService extends Service {
                 String downloadId = intent.getStringExtra(UpdaterController.EXTRA_DOWNLOAD_ID);
                 if (UpdaterController.ACTION_UPDATE_STATUS.equals(intent.getAction())) {
                     Update update = mUpdaterController.getUpdate(downloadId);
+                    if (update == null) {
+                        tryStopSelf();
+                        return;
+                    }
                     setNotificationTitle(update);
                     Bundle extras = new Bundle();
                     extras.putString(UpdaterController.EXTRA_DOWNLOAD_ID, downloadId);
@@ -104,11 +109,15 @@ public class UpdaterService extends Service {
                     handleUpdateStatusChange(update);
                 } else if (UpdaterController.ACTION_DOWNLOAD_PROGRESS.equals(intent.getAction())) {
                     Update update = mUpdaterController.getUpdate(downloadId);
-                    handleDownloadProgressChange(update);
+                    if (update != null) {
+                        handleDownloadProgressChange(update);
+                    }
                 } else if (UpdaterController.ACTION_INSTALL_PROGRESS.equals(intent.getAction())) {
                     Update update = mUpdaterController.getUpdate(downloadId);
-                    setNotificationTitle(update);
-                    handleInstallProgress(update);
+                    if (update != null) {
+                        setNotificationTitle(update);
+                        handleInstallProgress(update);
+                    }
                 } else if (UpdaterController.ACTION_UPDATE_REMOVED.equals(intent.getAction())) {
                     final boolean isLocalUpdate = Update.LOCAL_ID.equals(downloadId);
                     Bundle extras = mNotificationBuilder.getExtras();
@@ -203,11 +212,17 @@ public class UpdaterService extends Service {
                     ABUpdateInstaller installer = ABUpdateInstaller.getInstance(this,
                             mUpdaterController, mUserPreferencesRepository);
                     if (canStreamUpdate) {
+                        Log.i(TAG, "Installing " + downloadId + " with update_engine, streaming "
+                                + update.getDownloadUrl());
                         installer.installStreaming(downloadId);
                     } else {
+                        Log.i(TAG, "Installing " + downloadId + " with update_engine from "
+                                + update.getFile());
                         installer.install(downloadId);
                     }
                 } else {
+                    Log.i(TAG, "Installing " + downloadId + " with recovery from "
+                            + update.getFile());
                     UpdateInstaller installer = UpdateInstaller.getInstance(this,
                             mUpdaterController);
                     installer.install(downloadId);
@@ -252,8 +267,9 @@ public class UpdaterService extends Service {
     }
 
     private void tryStopSelf() {
-        if (!mHasClients && !mUpdaterController.hasActiveDownloads() &&
-                !mUpdaterController.isInstallingUpdate()) {
+        // isBusy() covers verification and local imports too: stopping while a multi-GB
+        // package is being checked would let the process be frozen or killed mid-way.
+        if (!mHasClients && !mUpdaterController.isBusy()) {
             Log.d(TAG, "Service no longer needed, stopping");
             stopSelf();
         }
@@ -355,10 +371,20 @@ public class UpdaterService extends Service {
                 String text = getString(R.string.verifying_download_notification);
                 mNotificationStyle.bigText(text);
                 mNotificationBuilder.setTicker(text);
+                mNotificationBuilder.setOngoing(true);
+                mNotificationBuilder.setAutoCancel(false);
+                // Verification may start without a download before it (a restored or imported
+                // package), so make sure it runs as foreground work.
+                startForegroundSafely();
                 mNotificationManager.notify(NOTIFICATION_ID, mNotificationBuilder.build());
                 break;
             }
             case VERIFIED: {
+                if (Update.LOCAL_ID.equals(update.getDownloadId())) {
+                    // The import dialog reports the result of a local import
+                    dismissNotification();
+                    break;
+                }
                 stopForeground(STOP_FOREGROUND_DETACH);
                 mNotificationBuilder.mActions.clear();
                 mNotificationBuilder.setStyle(null);
@@ -374,6 +400,10 @@ public class UpdaterService extends Service {
                 break;
             }
             case VERIFICATION_FAILED: {
+                if (Update.LOCAL_ID.equals(update.getDownloadId())) {
+                    dismissNotification();
+                    break;
+                }
                 stopForeground(STOP_FOREGROUND_DETACH);
                 mNotificationBuilder.mActions.clear();
                 mNotificationBuilder.setStyle(null);
@@ -461,6 +491,25 @@ public class UpdaterService extends Service {
                 break;
             }
         }
+    }
+
+    private void startForegroundSafely() {
+        try {
+            startForeground(NOTIFICATION_ID, mNotificationBuilder.build(),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        } catch (ForegroundServiceStartNotAllowedException e) {
+            Log.w(TAG, "Can't enter the foreground now, continuing in the background", e);
+        }
+    }
+
+    private void dismissNotification() {
+        if (mUpdaterController.hasActiveDownloads()) {
+            // The notification is shared; it belongs to the running download now
+            return;
+        }
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        mNotificationManager.cancel(NOTIFICATION_ID);
+        tryStopSelf();
     }
 
     private void handleDownloadProgressChange(Update update) {

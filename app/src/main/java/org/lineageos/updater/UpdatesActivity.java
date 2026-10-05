@@ -15,6 +15,7 @@ import android.content.ServiceConnection;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -25,6 +26,8 @@ import androidx.lifecycle.ViewModelProvider;
 import org.lineageos.updater.controller.UpdaterController;
 import org.lineageos.updater.controller.UpdaterService;
 import org.lineageos.updater.data.Update;
+import org.lineageos.updater.data.UpdateStatus;
+import org.lineageos.updater.util.PackageVerifier;
 import org.lineageos.updater.util.StringUtil;
 import java.util.ArrayList;
 import java.util.List;
@@ -50,13 +53,22 @@ public class UpdatesActivity extends UpdatesScaffoldActivity implements UpdateIm
                 }
             });
 
+    private static final String STATE_AWAITING_IMPORT_RESULT = "awaiting_import_result";
+
     private UpdateImporter mUpdateImporter;
     private AlertDialog importDialog;
+    // Set while this screen started a local import whose result hasn't been shown yet
+    private boolean mAwaitingImportResult;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setupCompose();
+
+        if (savedInstanceState != null) {
+            mAwaitingImportResult =
+                    savedInstanceState.getBoolean(STATE_AWAITING_IMPORT_RESULT, false);
+        }
 
         mUpdateImporter = new UpdateImporter(this, this);
 
@@ -97,18 +109,21 @@ public class UpdatesActivity extends UpdatesScaffoldActivity implements UpdateIm
     }
 
     @Override
-    protected void onPause() {
-        if (importDialog != null) {
-            importDialog.dismiss();
-            importDialog = null;
-            mUpdateImporter.stopImport();
-        }
+    protected void onResume() {
+        super.onResume();
+        // The import runs in the controller, independent of this activity; pick up its state
+        refreshImportState();
+    }
 
-        super.onPause();
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putBoolean(STATE_AWAITING_IMPORT_RESULT, mAwaitingImportResult);
     }
 
     @Override
     public void onStop() {
+        dismissImportDialog();
         unregisterReceiver(mBroadcastReceiver);
         if (mUpdaterService != null) {
             unbindService(mConnection);
@@ -135,40 +150,79 @@ public class UpdatesActivity extends UpdatesScaffoldActivity implements UpdateIm
 
     @Override
     public void onImportStarted() {
-        if (importDialog != null && importDialog.isShowing()) {
-            importDialog.dismiss();
-        }
-
-        importDialog = new AlertDialog.Builder(this)
-                .setTitle(R.string.local_update_import)
-                .setView(R.layout.progress_dialog)
-                .setCancelable(false)
-                .create();
-
-        importDialog.show();
+        mAwaitingImportResult = true;
+        refreshImportState();
     }
 
     @Override
-    public void onImportCompleted(Update update) {
+    public void onImportRejected() {
+        showToast(R.string.local_update_import_busy, Toast.LENGTH_LONG);
+    }
+
+    /**
+     * Shows the progress of a local import while the controller copies and verifies the
+     * package, then its result once, if this screen started it.
+     */
+    private void refreshImportState() {
+        UpdaterController controller = UpdaterController.getInstance(this);
+        if (controller.isImportingLocalUpdate()) {
+            showImportDialog(R.string.local_update_import_progress);
+            return;
+        }
+        if (controller.isVerifyingUpdate(Update.LOCAL_ID)) {
+            showImportDialog(R.string.list_verifying_update);
+            return;
+        }
+        dismissImportDialog();
+        if (!mAwaitingImportResult) {
+            return;
+        }
+        mAwaitingImportResult = false;
+
+        Update update = controller.getUpdate(Update.LOCAL_ID);
+        if (update != null && update.getStatus() == UpdateStatus.VERIFIED) {
+            new AlertDialog.Builder(this)
+                    .setTitle(R.string.local_update_import_success_title)
+                    .setMessage(getString(
+                            R.string.local_update_import_success_message,
+                            StringUtil.formatBuildDate(this, update.getTimestamp())))
+                    .setPositiveButton(android.R.string.ok, null)
+                    .show();
+        } else {
+            showVerificationFailure(R.string.local_update_import_failure,
+                    update != null ? update.getVerificationFailure() : null);
+        }
+    }
+
+    private void showImportDialog(int messageRes) {
+        if (importDialog == null) {
+            importDialog = new AlertDialog.Builder(this)
+                    .setTitle(R.string.local_update_import)
+                    .setView(R.layout.progress_dialog)
+                    .setCancelable(false)
+                    .create();
+        }
+        if (!importDialog.isShowing()) {
+            importDialog.show();
+        }
+        TextView text = importDialog.findViewById(R.id.progress_text);
+        if (text != null) {
+            text.setText(messageRes);
+        }
+    }
+
+    private void dismissImportDialog() {
         if (importDialog != null) {
             importDialog.dismiss();
             importDialog = null;
         }
+    }
 
-        if (update == null) {
-            new AlertDialog.Builder(this)
-                    .setTitle(R.string.local_update_import)
-                    .setMessage(R.string.local_update_import_failure)
-                    .setPositiveButton(android.R.string.ok, null)
-                    .show();
-            return;
-        }
-
+    private void showVerificationFailure(int titleRes, PackageVerifier.Failure failure) {
         new AlertDialog.Builder(this)
-                .setTitle(R.string.local_update_import_success_title)
-                .setMessage(getString(
-                        R.string.local_update_import_success_message,
-                        StringUtil.formatBuildDate(this, update.getTimestamp())))
+                .setTitle(titleRes)
+                .setMessage(failure != null ? failure.getMessageRes()
+                        : R.string.snack_download_verification_failed)
                 .setPositiveButton(android.R.string.ok, null)
                 .show();
     }
@@ -182,6 +236,7 @@ public class UpdatesActivity extends UpdatesScaffoldActivity implements UpdateIm
             setUpdaterController(mUpdaterService.getUpdaterController());
             syncControllerUpdates(
                     Objects.requireNonNull(mViewModel.getUiState().getValue()).getUpdates());
+            refreshImportState();
         }
 
         @Override
@@ -207,16 +262,24 @@ public class UpdatesActivity extends UpdatesScaffoldActivity implements UpdateIm
 
     private void handleDownloadStatusChange(String downloadId) {
         if (Update.LOCAL_ID.equals(downloadId)) {
+            refreshImportState();
             return;
         }
 
-        Update update = mUpdaterService.getUpdaterController().getUpdate(downloadId);
+        Update update = UpdaterController.getInstance(this).getUpdate(downloadId);
+        if (update == null) {
+            return;
+        }
         switch (update.getStatus()) {
             case PAUSED_ERROR:
-                showToast(R.string.snack_download_failed, Toast.LENGTH_LONG);
+                showToast(update.getVerificationFailure() != null
+                        ? update.getVerificationFailure().getMessageRes()
+                        : R.string.snack_download_failed, Toast.LENGTH_LONG);
                 break;
             case VERIFICATION_FAILED:
-                showToast(R.string.snack_download_verification_failed, Toast.LENGTH_LONG);
+                // The package was discarded; say why, so it isn't mistaken for a lost download
+                showVerificationFailure(R.string.snack_download_verification_failed,
+                        update.getVerificationFailure());
                 break;
             case VERIFIED:
                 showToast(R.string.snack_download_verified, Toast.LENGTH_LONG);
