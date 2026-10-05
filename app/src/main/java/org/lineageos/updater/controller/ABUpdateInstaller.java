@@ -27,6 +27,8 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -52,11 +54,31 @@ class ABUpdateInstaller {
 
     private boolean mFinalizing;
     private int mProgress;
+    private int mLastEngineStatus = -1;
+
+    /** Name of an UpdateEngine int constant, for logs; falls back to the raw value. */
+    private static String constantName(Class<?> constants, int value) {
+        for (Field field : constants.getFields()) {
+            try {
+                if (Modifier.isStatic(field.getModifiers()) && field.getType() == int.class
+                        && field.getInt(null) == value) {
+                    return field.getName() + " (" + value + ")";
+                }
+            } catch (IllegalAccessException ignored) {
+            }
+        }
+        return String.valueOf(value);
+    }
 
     private final UpdateEngineCallback mUpdateEngineCallback = new UpdateEngineCallback() {
 
         @Override
         public void onStatusUpdate(int status, float percent) {
+            if (status != mLastEngineStatus) {
+                Log.i(TAG, "update_engine status " + constantName(
+                        UpdateEngine.UpdateStatusConstants.class, status) + " for " + mDownloadId);
+                mLastEngineStatus = status;
+            }
             Update update = mUpdaterController.getUpdate(mDownloadId);
             if (update == null) {
                 // We read the id from a preference, the update could no longer exist
@@ -105,6 +127,8 @@ class ABUpdateInstaller {
 
         @Override
         public void onPayloadApplicationComplete(int errorCode) {
+            Log.i(TAG, "update_engine finished " + mDownloadId + ": " + constantName(
+                    UpdateEngine.ErrorCodeConstants.class, errorCode));
             if (errorCode != UpdateEngine.ErrorCodeConstants.SUCCESS) {
                 installationDone(false);
                 Update update = mUpdaterController.getUpdate(mDownloadId);
@@ -221,6 +245,8 @@ class ABUpdateInstaller {
         }
 
         String zipFileUri = "file://" + file.getAbsolutePath();
+        Log.i(TAG, "Applying " + zipFileUri + " (" + file.length() + " bytes), payload offset "
+                + offset);
         applyUpdate(zipFileUri, offset, 0, headerKeyValuePairs);
     }
 
@@ -277,6 +303,8 @@ class ABUpdateInstaller {
         try {
             mUpdateEngine.applyPayload(url, offset, size, headerKeyValuePairs);
         } catch (ServiceSpecificException e) {
+            Log.e(TAG, "applyPayload rejected " + mDownloadId + ": " + constantName(
+                    UpdateEngine.ErrorCodeConstants.class, e.errorCode), e);
             if (e.errorCode == 66 /* kUpdateAlreadyInstalled */) {
                 installationDone(true);
                 Update update = mUpdaterController.getUpdate(mDownloadId);

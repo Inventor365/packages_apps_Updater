@@ -5,6 +5,7 @@
 
 package org.lineageos.updater.data
 
+import org.lineageos.updater.util.PackageVerifier
 import java.io.File
 
 data class Update(
@@ -31,6 +32,8 @@ data class Update(
     val timestamp: Long = 0,
     val type: String? = null,
     val version: String = "",
+    /** Why the last verification of this package failed. Not persisted. */
+    val verificationFailure: PackageVerifier.Failure? = null,
 ) {
     fun withAvailableOnline(v: Boolean) = copy(isAvailableOnline = v)
     fun withDownloadId(v: String) = copy(downloadId = v)
@@ -49,6 +52,7 @@ data class Update(
     fun withTimestamp(v: Long) = copy(timestamp = v)
     fun withType(v: String?) = copy(type = v)
     fun withVersion(v: String) = copy(version = v)
+    fun withVerificationFailure(v: PackageVerifier.Failure?) = copy(verificationFailure = v)
 
     fun toBuilder() = Builder(this)
 
@@ -76,6 +80,7 @@ data class Update(
         private var timestamp: Long = 0,
         private var type: String? = null,
         private var version: String = "",
+        private var verificationFailure: PackageVerifier.Failure? = null,
     ) {
         constructor(update: Update) : this(
             update.isAvailableOnline, update.downloadId, update.downloadUrl,
@@ -84,7 +89,7 @@ data class Update(
             update.payloadMetadataOffset, update.payloadMetadataSize, update.payloadOffset,
             update.payloadSize, update.payloadPropertiesOffset, update.payloadPropertiesSize,
             update.progress, update.speed, update.status, update.timestamp, update.type,
-            update.version,
+            update.version, update.verificationFailure,
         )
 
         fun setAvailableOnline(v: Boolean) = apply { isAvailableOnline = v }
@@ -110,11 +115,13 @@ data class Update(
         fun setTimestamp(v: Long) = apply { timestamp = v }
         fun setType(v: String?) = apply { type = v }
         fun setVersion(v: String) = apply { version = v }
+        fun setVerificationFailure(v: PackageVerifier.Failure?) = apply { verificationFailure = v }
         fun build() = Update(
             isAvailableOnline, downloadId, downloadUrl, eta, file, fileSize,
             isFinalizing, installProgress, name, osPatchLevel, osSdkLevel, payloadMetadataOffset,
             payloadMetadataSize, payloadOffset, payloadSize, payloadPropertiesOffset,
             payloadPropertiesSize, progress, speed, status, timestamp, type, version,
+            verificationFailure,
         )
     }
 
@@ -128,7 +135,17 @@ data class Update(
     fun hasVerifiedPackage(): Boolean =
         status.hasVerifiedPackage() && file?.exists() == true
 
+    /**
+     * SHA-256 published by the update server, or null when there is none (local imports,
+     * or servers that only provide another identifier). Network updates are keyed by their
+     * SHA-256, so the download ID doubles as the expected digest when it has that shape.
+     */
+    val expectedSha256: String?
+        get() = downloadId.takeIf { SHA256_REGEX.matches(it) }?.lowercase()
+
     companion object {
         const val LOCAL_ID = "local"
+
+        private val SHA256_REGEX = Regex("^[0-9a-fA-F]{64}$")
     }
 }

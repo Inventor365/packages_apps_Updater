@@ -15,7 +15,6 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.security.MessageDigest
-import java.util.zip.ZipFile
 import android.os.FileUtils as OsFileUtils
 
 object FileUtils {
@@ -75,7 +74,7 @@ object FileUtils {
     }
 
     /**
-     * Computes the cryptographic hash (SHA-256, MD5, SHA-1) of a file.
+     * Computes the hex digest of a file with the given [MessageDigest] algorithm.
      */
     @JvmStatic
     fun calculateHash(file: File, algorithm: String): String? = try {
@@ -91,59 +90,5 @@ object FileUtils {
     } catch (e: Exception) {
         Log.e(TAG, "Failed to compute $algorithm hash for $file", e)
         null
-    }
-
-    /**
-     * Checks if a file is a valid, uncorrupted zip archive.
-     */
-    @JvmStatic
-    fun isZipValid(file: File): Boolean = try {
-        ZipFile(file).use { zip ->
-            zip.size() > 0
-        }
-    } catch (e: Exception) {
-        Log.e(TAG, "Zip file $file is corrupted or invalid", e)
-        false
-    }
-
-    /**
-     * Verifies package integrity:
-     * 1. Checks zip archive structure (ensures file is not corrupted or truncated).
-     * 2. If a hash is provided (SHA-256 or MD5), verifies that the file matches the expected hash.
-     * Bypasses strict OEM cryptographic signature verification so custom/unofficial builds work.
-     */
-    @JvmStatic
-    fun verifyPackageIntegrity(file: File, expectedHash: String?): Boolean {
-        if (!file.exists() || !isZipValid(file)) {
-            Log.e(TAG, "Package is missing or not a valid zip archive: $file")
-            return false
-        }
-
-        if (expectedHash.isNullOrBlank() || expectedHash.equals("local", ignoreCase = true)) {
-            Log.d(TAG, "Package zip integrity verified (local or unhashed update): ${file.name}")
-            return true
-        }
-
-        val cleanExpected = expectedHash.trim().lowercase()
-        val algorithm = when (cleanExpected.length) {
-            64 -> "SHA-256"
-            32 -> "MD5"
-            40 -> "SHA-1"
-            else -> null
-        }
-
-        if (algorithm == null) {
-            Log.d(TAG, "Expected identifier is not a hash, zip integrity verified: ${file.name}")
-            return true
-        }
-
-        val computedHash = calculateHash(file, algorithm)?.lowercase()
-        val matches = computedHash == cleanExpected
-        if (!matches) {
-            Log.e(TAG, "$algorithm hash mismatch for ${file.name}: expected $cleanExpected, computed $computedHash")
-        } else {
-            Log.d(TAG, "$algorithm hash verified successfully for ${file.name}")
-        }
-        return matches
     }
 }

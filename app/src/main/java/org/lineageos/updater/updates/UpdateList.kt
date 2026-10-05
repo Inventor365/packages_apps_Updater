@@ -54,7 +54,10 @@ fun UpdateList(
         rememberSaveable(items.first().downloadId) {
             mutableStateOf(setOf(items.first().downloadId))
         }
-    val activeItems = items.filter { it.progress != null }
+    // Updates with an operation in progress or a package on disk (downloaded or imported) must
+    // stay reachable when collapsed; otherwise an imported package can sit hidden behind a
+    // remote update of the same build that only offers a download.
+    val activeItems = items.filter { it.progress != null || it.isLocal }
     val collapsedVisibleItems = (listOf(items.first()) + activeItems).distinctBy { it.downloadId }
     val hiddenItemCount = items.size - collapsedVisibleItems.size
     val visibleItemIds =
