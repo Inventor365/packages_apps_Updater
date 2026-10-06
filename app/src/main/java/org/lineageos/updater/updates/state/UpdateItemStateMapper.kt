@@ -244,7 +244,9 @@ class UpdateItemStateMapper(
     }
 
     private fun downloadedSize(update: Update): String {
-        val downloaded = Formatter.formatShortFileSize(context, update.file?.length() ?: 0L)
+        // Parallel downloads fill the package out of order, so its file size says nothing
+        val downloaded = Formatter.formatShortFileSize(context,
+            update.fileSize * update.progress / 100)
         val total = Formatter.formatShortFileSize(context, update.fileSize)
 
         return context.getString(R.string.list_download_progress_newer, downloaded, total)

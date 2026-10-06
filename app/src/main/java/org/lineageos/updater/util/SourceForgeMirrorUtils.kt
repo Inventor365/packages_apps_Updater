@@ -7,27 +7,39 @@
 package org.lineageos.updater.util
 
 import android.os.SystemProperties
-import android.util.Log
-import java.io.IOException
-import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 import java.util.TimeZone
-import java.util.concurrent.Callable
-import java.util.concurrent.ExecutorCompletionService
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
+/**
+ * SourceForge mirrors to try next to the one SourceForge picked. A download link resolves to a
+ * signed URL on one mirror (`<mirror>.dl.sourceforge.net/project/...?...&st=...`) that any
+ * other mirror accepts as well; the download client measures them and uses the fastest.
+ */
 object SourceForgeMirrorUtils {
-    private const val TAG = "SourceForgeMirrorUtils"
     private const val PROP_PREFERRED_MIRROR = "lunaris.updater.sf_mirror"
-    const val DEFAULT_PREFERRED_MIRROR = "twds"
 
-    // Recognized reliable SourceForge mirrors categorized by geographic region
-    private val ASIA_OCEANIA_MIRRORS = listOf("twds", "jaist", "pilotfiber", "master", "phoenixnap")
-    private val EUROPE_AFRICA_MIRRORS = listOf("deac-riga", "netix", "netcologne", "twds", "pilotfiber", "master")
-    private val AMERICAS_MIRRORS = listOf("pilotfiber", "phoenixnap", "versaweb", "twds", "master")
-    private val GLOBAL_FALLBACK_MIRRORS = listOf("twds", "pilotfiber", "master", "phoenixnap", "deac-riga")
+    // Mirrors that served the Lunaris packages on 2026-10-06, nearest first per region
+    private val ASIA_OCEANIA_MIRRORS = listOf(
+        "excellmedia", // Hyderabad
+        "onboardcloud", // Singapore
+        "zenlayer", // Hong Kong
+        "twds", // Taipei
+    )
+    private val EUROPE_AFRICA_MIRRORS = listOf(
+        "altushost-swe", // Stockholm
+        "netix", // Sofia
+        "deac-riga", // Riga
+        "yer", // Baku
+    )
+    private val AMERICAS_MIRRORS = listOf(
+        "pilotfiber", // New York
+        "gigenet", // Chicago
+        "netactuate", // Durham
+        "phoenixnap", // Phoenix
+        "psychz", // Los Angeles
+    )
+    private val GLOBAL_FALLBACK_MIRRORS = listOf("onboardcloud", "twds", "altushost-swe", "pilotfiber")
 
     enum class Region {
         ASIA_OCEANIA, EUROPE_AFRICA, AMERICAS, GLOBAL
@@ -53,13 +65,16 @@ object SourceForgeMirrorUtils {
             "US", "CA", "MX", "BR", "AR", "CL", "CO", "PE", "VE"
         )
 
+        // The time zone is the better hint: many phones use an en-US locale outside the US
         return when {
-            country in asiaCountries || timeZone.startsWith("asia/") || timeZone.startsWith("australia/") || timeZone.startsWith("pacific/") ->
-                Region.ASIA_OCEANIA
-            country in europeAfricaCountries || timeZone.startsWith("europe/") || timeZone.startsWith("africa/") ->
+            timeZone.startsWith("asia/") || timeZone.startsWith("australia/") ||
+                    timeZone.startsWith("pacific/") -> Region.ASIA_OCEANIA
+            timeZone.startsWith("europe/") || timeZone.startsWith("africa/") ->
                 Region.EUROPE_AFRICA
-            country in americasCountries || timeZone.startsWith("america/") ->
-                Region.AMERICAS
+            timeZone.startsWith("america/") -> Region.AMERICAS
+            country in asiaCountries -> Region.ASIA_OCEANIA
+            country in europeAfricaCountries -> Region.EUROPE_AFRICA
+            country in americasCountries -> Region.AMERICAS
             else -> Region.GLOBAL
         }
     }
@@ -102,96 +117,23 @@ object SourceForgeMirrorUtils {
     }
 
     /**
-     * Generates candidate URLs with different mirrors for a SourceForge *.dl.sourceforge.net URL,
-     * ordered by the user's geographic location (with twds favored for Asia & global).
+     * The same file on the mirrors of the user's region, after the mirror [originalUrl] points
+     * to (SourceForge's own pick). Links that aren't SourceForge mirror links are returned as is.
      */
+    @JvmStatic
     fun getMirrorCandidateUrls(originalUrl: URL): List<URL> {
         if (!isSourceForgeDirectMirrorUrl(originalUrl)) {
             return listOf(originalUrl)
         }
 
-        val regionalMirrors = getRegionalMirrors()
-        val candidates = mutableListOf<URL>()
-        val protocol = originalUrl.protocol
-        val file = originalUrl.file
-        val port = originalUrl.port
-
-        for (mirror in regionalMirrors) {
-            val mirrorHost = "$mirror.dl.sourceforge.net"
-            val candidateUrl = if (port != -1) {
-                URL(protocol, mirrorHost, port, file)
-            } else {
-                URL(protocol, mirrorHost, file)
-            }
-            if (!candidates.contains(candidateUrl)) {
-                candidates.add(candidateUrl)
+        val candidates = mutableListOf(originalUrl)
+        for (mirror in getRegionalMirrors()) {
+            val host = "$mirror.dl.sourceforge.net"
+            val candidate = URL(originalUrl.protocol, host, originalUrl.port, originalUrl.file)
+            if (candidates.none { it.host.equals(host, ignoreCase = true) }) {
+                candidates.add(candidate)
             }
         }
-
-        if (!candidates.contains(originalUrl)) {
-            candidates.add(originalUrl)
-        }
-
         return candidates
-    }
-
-    /**
-     * Quickly probes candidate mirrors with lightweight HEAD requests to find the lowest-latency responsive mirror.
-     * If probing times out or fails, returns the top prioritized candidate.
-     */
-    fun selectFastestMirror(candidates: List<URL>): URL {
-        if (candidates.size <= 1) {
-            return candidates.firstOrNull() ?: throw IllegalArgumentException("Empty candidates")
-        }
-
-        val poolSize = minOf(candidates.size, 4)
-        val executor = Executors.newFixedThreadPool(poolSize)
-        try {
-            val completionService = ExecutorCompletionService<Pair<URL, Long>>(executor)
-            for (url in candidates.take(poolSize)) {
-                completionService.submit(Callable {
-                    val start = System.currentTimeMillis()
-                    val conn = (url.openConnection() as HttpURLConnection).apply {
-                        requestMethod = "HEAD"
-                        connectTimeout = 1500
-                        readTimeout = 1500
-                        instanceFollowRedirects = false
-                        setRequestProperty("User-Agent", "LunarisUpdater/1.0")
-                    }
-                    try {
-                        conn.connect()
-                        val code = conn.responseCode
-                        val elapsed = System.currentTimeMillis() - start
-                        if (code == 200 || code == 206) {
-                            return@Callable Pair(url, elapsed)
-                        }
-                    } finally {
-                        conn.disconnect()
-                    }
-                    throw IOException("Mirror ${url.host} returned non-success HTTP status")
-                })
-            }
-
-            val firstCompleted = completionService.poll(1500, TimeUnit.MILLISECONDS)
-            if (firstCompleted != null) {
-                val result = runCatching { firstCompleted.get() }.getOrNull()
-                if (result != null) {
-                    Log.d(TAG, "Fastest mirror detected based on location probe: ${result.first.host} (${result.second} ms)")
-                    return result.first
-                }
-            }
-        } catch (e: InterruptedException) {
-            // The caller is the download thread; a pause/cancel must survive the probe,
-            // otherwise the cancelled download keeps writing the package file.
-            Thread.currentThread().interrupt()
-            Log.w(TAG, "Mirror probe interrupted, using location priority")
-        } catch (e: Exception) {
-            Log.w(TAG, "Mirror probe failed, using location priority", e)
-        } finally {
-            executor.shutdownNow()
-        }
-
-        Log.d(TAG, "Selected top location-priority mirror: ${candidates.first().host}")
-        return candidates.first()
     }
 }

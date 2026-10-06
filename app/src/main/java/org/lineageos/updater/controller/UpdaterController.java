@@ -25,6 +25,7 @@ import org.lineageos.updater.data.source.local.UpdatesLocalDataSource;
 import org.lineageos.updater.data.source.local.UpdatesDatabase;
 import org.lineageos.updater.deviceinfo.DeviceInfoUtils;
 import org.lineageos.updater.download.DownloadClient;
+import org.lineageos.updater.download.PartialDownload;
 import org.lineageos.updater.misc.Utils;
 import org.lineageos.updater.util.OtaMetadataParser;
 import org.lineageos.updater.util.PackageVerifier;
@@ -282,7 +283,7 @@ public class UpdaterController {
             }
             final long now = SystemClock.elapsedRealtime();
             int progress = Math.round(bytesRead * 100f / contentLength);
-            if (progress != mProgress || mLastUpdate - now > MAX_REPORT_INTERVAL_MS) {
+            if (progress != mProgress || now - mLastUpdate > MAX_REPORT_INTERVAL_MS) {
                 mProgress = progress;
                 mLastUpdate = now;
                 synchronized (entry) {
@@ -477,7 +478,8 @@ public class UpdaterController {
         boolean needsVerification = false;
         if (status.hasVerifiedPackage() || status == UpdateStatus.PAUSED ||
                 status == UpdateStatus.PAUSED_ERROR) {
-            if (file == null || !file.exists()) {
+            final boolean complete = file != null && file.exists();
+            if (file == null || !PartialDownload.exists(file)) {
                 if (!availableOnline) {
                     deleteUpdateAsync(updateInfo);
                     Log.d(TAG, downloadId + " had an invalid status and is not online");
@@ -485,18 +487,19 @@ public class UpdaterController {
                 }
                 builder.setStatus(UpdateStatus.UPDATE_AVAILABLE);
                 builder.setProgress(0);
-            } else if (status.hasVerifiedPackage()) {
+            } else if (status.hasVerifiedPackage() && complete) {
                 // The package changed since it was verified; check it again before offering it.
                 needsVerification = updateInfo.getFileSize() > 0 &&
                         file.length() != updateInfo.getFileSize();
             } else if (updateInfo.getFileSize() > 0) {
                 builder.setStatus(UpdateStatus.PAUSED);
-                int progress = Math.round(file.length() * 100f / updateInfo.getFileSize());
+                int progress = Math.round(PartialDownload.downloadedBytes(file) * 100f /
+                        updateInfo.getFileSize());
                 builder.setProgress(progress);
                 // A complete package still in a download state was never verified, typically
                 // because the process died while verifying. Finish that instead of making the
                 // user download it again.
-                needsVerification = file.length() >= updateInfo.getFileSize();
+                needsVerification = complete && file.length() >= updateInfo.getFileSize();
             }
         }
         builder.setAvailableOnline(availableOnline);
@@ -521,7 +524,7 @@ public class UpdaterController {
     public long getSpaceNeededForDownload(Update update) {
         File file = update.getFile();
         long remaining = update.getFileSize() -
-                (file != null && file.exists() ? file.length() : 0);
+                (file != null ? PartialDownload.downloadedBytes(file) : 0);
         return remaining > 0 ? remaining + MIN_FREE_BYTES : 0;
     }
 
@@ -554,21 +557,19 @@ public class UpdaterController {
         }
         Update update = entry.mUpdate;
         File destination = new File(mDownloadRoot, update.getName());
-        if (destination.exists()) {
+        if (PartialDownload.exists(destination)) {
             if (isFileUsedByOtherUpdate(destination, downloadId)) {
                 destination = Utils.appendSequentialNumber(destination);
                 Log.d(TAG, "Changing name with " + destination.getName());
-            } else if (update.getFileSize() > 0 &&
-                    destination.length() == update.getFileSize()) {
-                // The complete package is already here (e.g. its database row was lost).
-                // Verify it rather than download it again; verification decides if it's usable.
-                Log.i(TAG, "Reusing existing package " + destination + " for " + downloadId);
+            } else {
+                // The package, or part of it, is already here (e.g. its database row was lost,
+                // or a download was interrupted). Verify or continue it rather than download it
+                // all again; the download client checks it still matches the server's file.
+                Log.i(TAG, "Continuing with existing package " + destination + " for "
+                        + downloadId);
                 entry.mUpdate = update.withFile(destination);
                 resumeDownload(downloadId);
                 return;
-            } else {
-                Log.i(TAG, "Discarding stale partial file " + destination);
-                deleteQuietly(destination);
             }
         }
         if (!hasRoomForDownload(update.withFile(destination))) {
@@ -616,7 +617,7 @@ public class UpdaterController {
         entry.mUpdate = entry.mUpdate.withVerificationFailure(null);
         Update update = entry.mUpdate;
         File file = update.getFile();
-        if (file == null || !file.exists()) {
+        if (file == null || !PartialDownload.exists(file)) {
             Log.e(TAG, "The destination file of " + downloadId + " doesn't exist, can't resume");
             setStatus(entry, UpdateStatus.PAUSED_ERROR, "no file to resume");
             notifyUpdateChange(downloadId);
@@ -684,7 +685,9 @@ public class UpdaterController {
     private void deleteUpdateAsync(final Update update) {
         // Unlink right away, so a download or import started right after this can't pick up
         // the file that is being deleted.
-        deleteQuietly(update.getFile());
+        if (update.getFile() != null) {
+            PartialDownload.deleteQuietly(update.getFile());
+        }
         new Thread(() -> mUpdatesLocalDataSource.removeUpdate(update.getDownloadId())).start();
     }
 
