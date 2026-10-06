@@ -21,6 +21,8 @@ import org.lineageos.updater.data.UserPreferencesRepository;
 import org.lineageos.updater.download.SingleRangeHttpFetcher;
 import org.lineageos.updater.misc.Constants;
 import org.lineageos.updater.util.InstallFailure;
+import org.lineageos.updater.util.OtaMetadataParser;
+import org.lineageos.updater.util.SecurityPatch;
 import org.lineageos.updater.util.ZipEntryLocator;
 
 import java.io.BufferedReader;
@@ -267,14 +269,20 @@ class ABUpdateInstaller {
 
         long offset;
         String[] headerKeyValuePairs;
+        String securityPatch;
         try {
             ZipEntryLocator.StoredEntry payload =
                     ZipEntryLocator.locateStored(file, Constants.AB_PAYLOAD_BIN_PATH);
             offset = payload.getDataOffset();
             checkPayloadMagic(file, offset);
             headerKeyValuePairs = readPayloadProperties(file);
+            securityPatch = new OtaMetadataParser(file).getSecurityPatchLevel();
         } catch (IOException e) {
             fail(InstallFailure.PREPARE, "could not prepare " + file, e);
+            return;
+        }
+        headerKeyValuePairs = checkSecurityPatch(securityPatch, headerKeyValuePairs);
+        if (headerKeyValuePairs == null) {
             return;
         }
 
@@ -282,6 +290,34 @@ class ABUpdateInstaller {
         Log.i(TAG, "Applying " + zipFileUri + " (" + file.length() + " bytes), payload offset "
                 + offset);
         applyUpdate(zipFileUri, offset, 0, headerKeyValuePairs);
+    }
+
+    /**
+     * update_engine refuses updates with an older security patch than
+     * ro.build.version.security_patch, which can report a newer level than the build has. Check
+     * against the build's own level instead, and tell update_engine when its check would be
+     * wrong.
+     *
+     * @return the payload properties to apply with, or null if the update must not be applied
+     */
+    private String[] checkSecurityPatch(String packageLevel, String[] headerKeyValuePairs) {
+        String installed = SecurityPatch.getInstalledLevel();
+        String reported = SecurityPatch.reportedLevel();
+        SecurityPatch.Check check = SecurityPatch.check(packageLevel, installed, reported);
+        Log.i(TAG, "Security patch of " + mDownloadId + ": " + packageLevel + ", installed build "
+                + installed + ", reported " + reported + ": " + check);
+        switch (check) {
+            case DOWNGRADE:
+                fail(InstallFailure.SECURITY_PATCH, "security patch " + packageLevel
+                        + " is older than " + installed, null);
+                return null;
+            case MISREPORTED:
+                List<String> headers = new ArrayList<>(Arrays.asList(headerKeyValuePairs));
+                headers.add(SecurityPatch.SPL_DOWNGRADE_HEADER);
+                return headers.toArray(new String[0]);
+            default:
+                return headerKeyValuePairs;
+        }
     }
 
     private static void checkPayloadMagic(File file, long offset) throws IOException {
@@ -337,11 +373,14 @@ class ABUpdateInstaller {
 
         new Thread(() -> {
             try {
-                String[] headerKeyValuePairs = fetchPayloadProperties(downloadUrl,
-                        update.getPayloadPropertiesOffset(),
-                        update.getPayloadPropertiesSize());
-                applyUpdate(downloadUrl, update.getPayloadOffset(),
-                        update.getPayloadSize(), headerKeyValuePairs);
+                String[] headerKeyValuePairs = checkSecurityPatch(update.getOsPatchLevel(),
+                        fetchPayloadProperties(downloadUrl,
+                                update.getPayloadPropertiesOffset(),
+                                update.getPayloadPropertiesSize()));
+                if (headerKeyValuePairs != null) {
+                    applyUpdate(downloadUrl, update.getPayloadOffset(),
+                            update.getPayloadSize(), headerKeyValuePairs);
+                }
             } catch (IOException | RuntimeException e) {
                 fail(InstallFailure.PREPARE, "could not prepare streaming update", e);
             }

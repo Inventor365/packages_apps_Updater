@@ -42,6 +42,7 @@
     <string name="install_error_prepare">The update package couldn\'t be read</string>
     <string name="install_error_space">Not enough free storage to install the update</string>
     <string name="install_error_downgrade">The update is older than the installed system</string>
+    <string name="install_error_security_patch">The update has an older security patch than the installed system, so installing it would erase your data</string>
     <string name="install_error_signature">The update isn\'t signed with a key this system trusts</string>
     <string name="install_error_package">The update package is damaged. Delete it and download it again.</string>
     <string name="install_error_postinstall">The last step of installing the update failed</string>

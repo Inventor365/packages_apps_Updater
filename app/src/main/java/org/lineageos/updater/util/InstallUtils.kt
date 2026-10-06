@@ -24,6 +24,12 @@ object InstallUtils {
 
     @JvmStatic
     fun getBlockedReason(update: Update): BlockedReason {
+        // An older security patch than the build's own can only be installed by erasing data.
+        // A newer reported level (see SecurityPatch) doesn't count.
+        if (SecurityPatch.check(update.osPatchLevel) == SecurityPatch.Check.DOWNGRADE) {
+            return BlockedReason.DOWNGRADE
+        }
+
         if (DeviceInfoUtils.isDowngradingAllowed) {
             return BlockedReason.NONE
         }

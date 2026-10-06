@@ -15,6 +15,7 @@ enum class InstallFailure(@param:StringRes val messageRes: Int) {
     PREPARE(R.string.install_error_prepare),
     SPACE(R.string.install_error_space),
     DOWNGRADE(R.string.install_error_downgrade),
+    SECURITY_PATCH(R.string.install_error_security_patch),
     SIGNATURE(R.string.install_error_signature),
     PACKAGE(R.string.install_error_package),
     POSTINSTALL(R.string.install_error_postinstall),
