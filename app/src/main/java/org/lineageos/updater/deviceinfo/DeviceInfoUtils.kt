@@ -25,6 +25,7 @@ object DeviceInfoUtils : SettingsLibDeviceInfoUtils() {
     private const val PROP_DEVICE_LUNARIS = "ro.lunaris.device"
     private const val PROP_DEVICE_LINEAGE = "ro.lineage.device"
     private const val PROP_DEVICE_PRODUCT = "ro.product.device"
+    private const val PROP_DEVICE_VENDOR = "ro.product.vendor.device"
     private const val PROP_PRODUCT_NAME = "ro.product.name"
     private const val PROP_PRODUCT_MODEL = "ro.product.model"
 
@@ -68,6 +69,18 @@ object DeviceInfoUtils : SettingsLibDeviceInfoUtils() {
             if (prod.isNotEmpty()) return prod
             return Build.DEVICE ?: ""
         }
+
+    /** Every codename this device goes by, as an OTA package would name it in pre-device. */
+    @JvmStatic
+    val deviceNames: Set<String>
+        get() = listOf(
+            SystemProperties.get(PROP_DEVICE_NEXT),
+            SystemProperties.get(PROP_DEVICE_LUNARIS),
+            SystemProperties.get(PROP_DEVICE_LINEAGE),
+            SystemProperties.get(PROP_DEVICE_PRODUCT),
+            SystemProperties.get(PROP_DEVICE_VENDOR),
+            Build.DEVICE.orEmpty(),
+        ).filter { it.isNotEmpty() }.toSet()
 
     @JvmStatic
     val productName: String
