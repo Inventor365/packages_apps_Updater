@@ -30,8 +30,8 @@ android {
         applicationId = "org.lineageos.updater"
         minSdk = 34
         targetSdk = 34
-        versionCode = 4
-        versionName = "3.12.3"
+        versionCode = 5
+        versionName = "3.12.4"
     }
 
     buildTypes {
