@@ -76,15 +76,11 @@ data class UpdateOperationState(
             val status = update.status
             val phase = when {
                 controller.isDownloading(downloadId) -> UpdateOperationPhase.DOWNLOADING
-                status == UpdateStatus.PAUSED -> UpdateOperationPhase.DOWNLOAD_PAUSED
-                status == UpdateStatus.PAUSED_ERROR -> UpdateOperationPhase.DOWNLOAD_ERROR
-
                 controller.isVerifyingUpdate(downloadId) -> UpdateOperationPhase.VERIFYING
-                status == UpdateStatus.VERIFICATION_FAILED -> UpdateOperationPhase.VERIFICATION_FAILED
-                status == UpdateStatus.VERIFIED -> UpdateOperationPhase.VERIFIED
 
+                // An install outlives the process (it's tracked in preferences), while the
+                // update's own status comes back from the database as VERIFIED
                 controller.isWaitingForReboot(downloadId) -> UpdateOperationPhase.WAITING_FOR_REBOOT
-
                 controller.isInstallingUpdate(downloadId) ->
                     when {
                         !DeviceInfoUtils.isABDevice -> UpdateOperationPhase.INSTALLING_RECOVERY
@@ -93,13 +89,21 @@ data class UpdateOperationState(
                         else -> UpdateOperationPhase.INSTALLING
                     }
 
+                status == UpdateStatus.PAUSED -> UpdateOperationPhase.DOWNLOAD_PAUSED
+                status == UpdateStatus.PAUSED_ERROR -> UpdateOperationPhase.DOWNLOAD_ERROR
+                status == UpdateStatus.VERIFICATION_FAILED -> UpdateOperationPhase.VERIFICATION_FAILED
+                // A cancelled install leaves the verified package ready to install again
+                status == UpdateStatus.VERIFIED ||
+                        status == UpdateStatus.INSTALLATION_CANCELLED -> UpdateOperationPhase.VERIFIED
+
                 status == UpdateStatus.INSTALLATION_SUSPENDED -> UpdateOperationPhase.INSTALLATION_SUSPENDED
                 status == UpdateStatus.INSTALLATION_FAILED -> UpdateOperationPhase.INSTALLATION_FAILED
 
                 else -> UpdateOperationPhase.IDLE
             }
             val canDelete = phase == UpdateOperationPhase.VERIFIED ||
-                    phase == UpdateOperationPhase.VERIFICATION_FAILED
+                    phase == UpdateOperationPhase.VERIFICATION_FAILED ||
+                    (phase == UpdateOperationPhase.INSTALLATION_FAILED && update.file != null)
             val installBlockedReason = InstallUtils.getBlockedReason(update)
             val isLocal = downloadId == Update.LOCAL_ID
             val isFullyDownloaded = controller.isFullyDownloaded(update)

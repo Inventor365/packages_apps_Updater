@@ -9,6 +9,8 @@ import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.CancellationSignal;
+import android.os.OperationCanceledException;
 import android.os.ParcelFileDescriptor;
 import android.os.PowerManager;
 import android.os.SystemClock;
@@ -54,6 +56,9 @@ public class UpdaterController {
 
     private static final String LOCAL_UPDATE_FILE_NAME = "localUpdate.zip";
     private static final String PARTIAL_SUFFIX = ".part";
+    // Never fill the data partition: leave this much free after a download or an import
+    private static final long MIN_FREE_BYTES = 512L * 1024 * 1024;
+    private static final long SPACE_CHECK_INTERVAL = 64L * 1024 * 1024;
 
     private final Context mContext;
     private final UpdatesLocalDataSource mUpdatesLocalDataSource;
@@ -336,7 +341,7 @@ public class UpdaterController {
             try {
                 PackageVerifier.Result result = PackageVerifier.verify(update.getFile(),
                         isLocal ? 0 : update.getFileSize(), update.getExpectedSha256(),
-                        shouldVerifySignature(isLocal));
+                        shouldVerifySignature(isLocal), DeviceInfoUtils.getDeviceNames());
                 if (result.isVerified()) {
                     onVerified(entry);
                 } else {
@@ -364,6 +369,7 @@ public class UpdaterController {
             verified = entry.mUpdate.toBuilder()
                     .setStatus(UpdateStatus.VERIFIED)
                     .setVerificationFailure(null)
+                    .setInstallFailure(null)
                     .build();
             entry.mUpdate = verified;
         }
@@ -508,6 +514,22 @@ public class UpdaterController {
         return true;
     }
 
+    /**
+     * Free space needed to download the rest of the package: what is left of it, plus what is
+     * always kept free. 0 if nothing is left to download (or the size isn't known).
+     */
+    public long getSpaceNeededForDownload(Update update) {
+        File file = update.getFile();
+        long remaining = update.getFileSize() -
+                (file != null && file.exists() ? file.length() : 0);
+        return remaining > 0 ? remaining + MIN_FREE_BYTES : 0;
+    }
+
+    /** Whether the rest of the package fits on the data partition, leaving some room. */
+    public boolean hasRoomForDownload(Update update) {
+        return mDownloadRoot.getUsableSpace() >= getSpaceNeededForDownload(update);
+    }
+
     private boolean isFileUsedByOtherUpdate(File file, String downloadId) {
         for (DownloadEntry entry : mDownloads.values()) {
             Update update = entry.mUpdate;
@@ -548,6 +570,14 @@ public class UpdaterController {
                 Log.i(TAG, "Discarding stale partial file " + destination);
                 deleteQuietly(destination);
             }
+        }
+        if (!hasRoomForDownload(update.withFile(destination))) {
+            Log.e(TAG, "Not enough free space to download " + downloadId + " ("
+                    + update.getFileSize() + " bytes, " + mDownloadRoot.getUsableSpace()
+                    + " usable)");
+            entry.mUpdate = update.withVerificationFailure(PackageVerifier.Failure.NO_SPACE);
+            notifyUpdateChange(downloadId);
+            return;
         }
         pauseActiveDownloads();
         entry.mUpdate = update.withFile(destination).withVerificationFailure(null);
@@ -595,6 +625,14 @@ public class UpdaterController {
         if (isFullyDownloaded(update)) {
             setStatus(entry, UpdateStatus.VERIFYING, "package already complete");
             verifyUpdateAsync(downloadId);
+            notifyUpdateChange(downloadId);
+        } else if (!hasRoomForDownload(update)) {
+            Log.e(TAG, "Not enough free space to resume " + downloadId + " ("
+                    + mDownloadRoot.getUsableSpace() + " usable)");
+            entry.mUpdate = update.toBuilder()
+                    .setStatus(UpdateStatus.PAUSED_ERROR)
+                    .setVerificationFailure(PackageVerifier.Failure.NO_SPACE)
+                    .build();
             notifyUpdateChange(downloadId);
         } else {
             DownloadClient downloadClient;
@@ -734,7 +772,9 @@ public class UpdaterController {
             } catch (IOException | RuntimeException e) {
                 Log.e(TAG, "Could not copy local update from " + uri, e);
                 deleteQuietly(partFile);
-                finishFailedImport(PackageVerifier.Failure.IMPORT_FAILED, String.valueOf(e));
+                finishFailedImport(e instanceof NoSpaceException
+                        ? PackageVerifier.Failure.NO_SPACE
+                        : PackageVerifier.Failure.IMPORT_FAILED, String.valueOf(e));
                 return;
             }
 
@@ -785,16 +825,41 @@ public class UpdaterController {
         return mImportingLocalUpdate.get();
     }
 
+    private static final class NoSpaceException extends IOException {
+        NoSpaceException(String message) {
+            super(message);
+        }
+    }
+
     private void copyToFile(Uri uri, File destination) throws IOException {
         try (ParcelFileDescriptor pfd = mContext.getContentResolver()
                 .openFileDescriptor(uri, "r")) {
             if (pfd == null) {
                 throw new IOException("Could not open " + uri);
             }
+            final long size = pfd.getStatSize();
+            if (size >= 0 && mDownloadRoot.getUsableSpace() < size + MIN_FREE_BYTES) {
+                throw new NoSpaceException(size + " bytes to copy, "
+                        + mDownloadRoot.getUsableSpace() + " usable");
+            }
+            // The size can be unknown (e.g. a cloud provider), so keep an eye on the free space
+            // and stop before the partition fills up
+            final CancellationSignal signal = new CancellationSignal();
+            final long[] nextCheck = {SPACE_CHECK_INTERVAL};
             try (FileInputStream in = new FileInputStream(pfd.getFileDescriptor());
                  FileOutputStream out = new FileOutputStream(destination)) {
-                android.os.FileUtils.copy(in, out);
+                android.os.FileUtils.copy(in, out, signal, Runnable::run, progress -> {
+                    if (progress >= nextCheck[0]) {
+                        nextCheck[0] = progress + SPACE_CHECK_INTERVAL;
+                        if (mDownloadRoot.getUsableSpace() < MIN_FREE_BYTES) {
+                            signal.cancel();
+                        }
+                    }
+                });
                 out.getFD().sync();
+            } catch (OperationCanceledException e) {
+                throw new NoSpaceException("free space ran low after " + destination.length()
+                        + " bytes");
             }
         }
         Log.i(TAG, "Copied " + destination.length() + " bytes from " + uri);

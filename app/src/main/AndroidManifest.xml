@@ -5,8 +5,8 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.lineageos.updater"
-    android:versionCode="3"
-    android:versionName="3.12.2">
+    android:versionCode="4"
+    android:versionName="3.12.3">
 
     <uses-permission android:name="android.permission.ACCESS_CACHE_FILESYSTEM" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />

@@ -16,6 +16,6 @@
     <!-- Sheen gradient color -->
     <color name="brand_sheen">#EADDFF</color>
 
-    <!-- URL template for opening the device-specific downloads page from the update menu. -->
-    <string name="menu_downloads_url" translatable="false">https://sourceforge.net/projects/ghosuto/files/<xliff:g id="device_name">%1$s</xliff:g></string>
+    <!-- URL of the downloads page opened from the update menu. -->
+    <string name="menu_downloads_url" translatable="false">https://sourceforge.net/projects/yukiverse/files/luna/peridot/</string>
 </resources>

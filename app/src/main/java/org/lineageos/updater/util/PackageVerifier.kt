@@ -21,7 +21,9 @@ import java.security.SignatureException
  *
  * Every check that has the data it needs is mandatory, cheapest first:
  * 1. size, when the server published one;
- * 2. zip structure and OTA metadata (see [OtaMetadataParser]);
+ * 2. zip structure and OTA metadata (see [OtaMetadataParser]), including the device the
+ *    package is built for: update_engine doesn't check it, and the wrong device's payload
+ *    would be written to this one's partitions;
  * 3. SHA-256, when the server published one;
  * 4. whole-package signature against /system/etc/security/otacerts.zip, the same trust anchor
  *    update_engine uses for the payload signature on A/B devices.
@@ -37,11 +39,15 @@ object PackageVerifier {
         @param:StringRes val messageRes: Int,
         /** The bytes on disk are still a usable prefix, so the package must not be deleted. */
         val keepsPackage: Boolean = false,
+        /** Whether this is a problem with the package, rather than with getting it. */
+        val isVerification: Boolean = true,
     ) {
-        IMPORT_FAILED(R.string.verification_error_import),
+        IMPORT_FAILED(R.string.verification_error_import, isVerification = false),
+        NO_SPACE(R.string.verification_error_space, keepsPackage = true, isVerification = false),
         MISSING(R.string.verification_error_missing),
         INCOMPLETE(R.string.verification_error_incomplete, keepsPackage = true),
         CORRUPT(R.string.verification_error_corrupt),
+        WRONG_DEVICE(R.string.verification_error_wrong_device),
         HASH_MISMATCH(R.string.verification_error_hash),
         UNTRUSTED_KEY(R.string.verification_error_untrusted_key),
         BAD_SIGNATURE(R.string.verification_error_signature),
@@ -53,12 +59,18 @@ object PackageVerifier {
             get() = failure == null
     }
 
+    /**
+     * @param devices names this device goes by; the package must list one of them as its
+     * pre-device, if it lists any. Null skips the check.
+     */
     @JvmStatic
+    @JvmOverloads
     fun verify(
         file: File?,
         expectedSize: Long,
         expectedSha256: String?,
         checkSignature: Boolean,
+        devices: Collection<String>? = null,
     ): Result {
         if (file == null || !file.isFile) {
             return fail(Failure.MISSING, "no package at $file")
@@ -76,14 +88,19 @@ object PackageVerifier {
             return fail(Failure.CORRUPT, "$actualSize bytes, expected $expectedSize")
         }
 
-        try {
-            val metadata = OtaMetadataParser(file)
-            Log.i(
-                TAG, "OTA metadata: ab=${metadata.isABUpdate} timestamp=${metadata.timestamp} " +
-                        "sdk=${metadata.sdkLevel} spl=${metadata.securityPatchLevel}"
-            )
+        val metadata = try {
+            OtaMetadataParser(file)
         } catch (e: IOException) {
             return fail(Failure.CORRUPT, e.message ?: "invalid OTA package", e)
+        }
+        Log.i(
+            TAG, "OTA metadata: ab=${metadata.isABUpdate} timestamp=${metadata.timestamp} " +
+                    "sdk=${metadata.sdkLevel} spl=${metadata.securityPatchLevel} " +
+                    "devices=${metadata.preDevices}"
+        )
+        if (devices != null && metadata.preDevices.isNotEmpty() &&
+                metadata.preDevices.none { it in devices }) {
+            return fail(Failure.WRONG_DEVICE, "built for ${metadata.preDevices}, this is $devices")
         }
 
         if (expectedSha256 != null) {

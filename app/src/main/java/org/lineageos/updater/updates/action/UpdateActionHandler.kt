@@ -6,8 +6,11 @@
 package org.lineageos.updater.updates.action
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.os.PowerManager
+import android.text.format.Formatter
+import android.util.Log
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -42,8 +45,10 @@ class UpdateActionHandler(
         val downloadId = update.downloadId
         when (action.type) {
             UpdateActionType.START_DOWNLOAD -> runWithActiveDownloadWarning(update) {
-                runDownloadWithMeteredWarning {
-                    updaterController.startDownload(downloadId)
+                runWithSpaceCheck(update) {
+                    runDownloadWithMeteredWarning {
+                        updaterController.startDownload(downloadId)
+                    }
                 }
             }
 
@@ -52,8 +57,10 @@ class UpdateActionHandler(
                 if (updaterController.isFullyDownloaded(update)) {
                     updaterController.resumeDownload(downloadId)
                 } else {
-                    runDownloadWithMeteredWarning {
-                        updaterController.resumeDownload(downloadId)
+                    runWithSpaceCheck(update) {
+                        runDownloadWithMeteredWarning {
+                            updaterController.resumeDownload(downloadId)
+                        }
                     }
                 }
             }
@@ -194,14 +201,12 @@ class UpdateActionHandler(
                 )
             )
 
-            UpdateActionType.VIEW_DOWNLOADS -> {
-                val rawUrl = activity.getString(R.string.menu_downloads_url)
-                val url = rawUrl
-                    .replace("{device}", DeviceInfoUtils.device)
-                    .replace("%1\$s", DeviceInfoUtils.device)
+            UpdateActionType.VIEW_DOWNLOADS -> try {
                 activity.startActivity(
-                    Intent(Intent.ACTION_VIEW, url.toUri())
+                    Intent(Intent.ACTION_VIEW, activity.getString(R.string.menu_downloads_url).toUri())
                 )
+            } catch (e: ActivityNotFoundException) {
+                Log.w(TAG, "No app can open the downloads page", e)
             }
 
             UpdateActionType.REBOOT ->
@@ -221,6 +226,28 @@ class UpdateActionHandler(
             title = activity.getString(R.string.download_switch_confirm_title),
             message = activity.getString(R.string.download_switch_confirm_message),
             onConfirm = downloadAction,
+        )
+    }
+
+    private fun runWithSpaceCheck(update: Update, downloadAction: () -> Unit) {
+        if (updaterController.hasRoomForDownload(update)) {
+            downloadAction()
+            return
+        }
+
+        showDialog(
+            AlertDialogState(
+                title = activity.getString(R.string.dialog_no_space_title),
+                text = AnnotatedString(
+                    activity.getString(
+                        R.string.dialog_no_space_message,
+                        Formatter.formatShortFileSize(
+                            activity,
+                            updaterController.getSpaceNeededForDownload(update),
+                        ),
+                    )
+                ),
+            )
         )
     }
 
@@ -289,5 +316,9 @@ class UpdateActionHandler(
                 showDismiss = true,
             )
         )
+    }
+
+    companion object {
+        private const val TAG = "UpdateActionHandler"
     }
 }

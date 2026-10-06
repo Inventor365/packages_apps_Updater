@@ -107,6 +107,30 @@ class UpdateItemStateMapper(
                 },
             )
 
+            UpdateOperationPhase.INSTALLATION_FAILED -> ActionButtons(
+                primary = when {
+                    state.requiresManualInstall -> action(
+                        type = UpdateActionType.OPEN_GUIDE,
+                    )
+
+                    !state.canInstall -> action(
+                        type = UpdateActionType.SHOW_INFO,
+                        enabled = !state.isBusy,
+                    )
+
+                    // Try again with the package that is already here
+                    update.hasVerifiedPackage() && update.hasFullyDownloadedPackage() -> action(
+                        type = UpdateActionType.START_INSTALL,
+                        enabled = !state.isBusy,
+                    )
+
+                    else -> action(
+                        type = UpdateActionType.START_DOWNLOAD,
+                        enabled = networkState.isOnline && update.downloadUrl != null,
+                    )
+                },
+            )
+
             UpdateOperationPhase.INSTALLING_RECOVERY -> ActionButtons(
                 primary = action(UpdateActionType.CANCEL_INSTALL),
             )
@@ -173,13 +197,7 @@ class UpdateItemStateMapper(
                 R.string.list_build_version,
                 update.version,
             ),
-            status = when (val failure = update.verificationFailure) {
-                null -> state.titleRes?.let { context.getString(it) } ?: ""
-                else -> context.getString(
-                    R.string.verification_failed_reason,
-                    context.getString(failure.messageRes),
-                )
-            },
+            status = statusText(state, update),
             fileSize = Formatter.formatShortFileSize(context, update.fileSize),
             androidUpdateInfo = when {
                 update.osSdkLevel > DeviceInfoUtils.sdkLevel ->
@@ -202,6 +220,27 @@ class UpdateItemStateMapper(
             progress = progress,
             actions = actions,
         )
+    }
+
+    private fun statusText(state: UpdateOperationState, update: Update): String {
+        val installFailure = update.installFailure
+        val verificationFailure = update.verificationFailure
+        return when {
+            state.phase == UpdateOperationPhase.INSTALLATION_FAILED && installFailure != null ->
+                context.getString(
+                    R.string.install_failed_reason,
+                    context.getString(installFailure.messageRes),
+                )
+
+            verificationFailure == null -> state.titleRes?.let { context.getString(it) } ?: ""
+
+            verificationFailure.isVerification -> context.getString(
+                R.string.verification_failed_reason,
+                context.getString(verificationFailure.messageRes),
+            )
+
+            else -> context.getString(verificationFailure.messageRes)
+        }
     }
 
     private fun downloadedSize(update: Update): String {

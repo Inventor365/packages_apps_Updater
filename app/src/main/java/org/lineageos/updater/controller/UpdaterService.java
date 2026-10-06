@@ -16,7 +16,6 @@ import android.content.pm.ServiceInfo;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
-import android.os.ServiceSpecificException;
 import android.text.format.Formatter;
 import android.util.Log;
 
@@ -31,6 +30,7 @@ import org.lineageos.updater.data.UpdateStatus;
 import org.lineageos.updater.data.UserPreferencesRepository;
 import org.lineageos.updater.misc.Utils;
 import org.lineageos.updater.notifications.NotificationHelper;
+import org.lineageos.updater.util.InstallFailure;
 import org.lineageos.updater.util.InstallUtils;
 import org.lineageos.updater.util.OtaMetadataParser;
 import org.lineageos.updater.util.StringUtil;
@@ -193,7 +193,7 @@ public class UpdaterService extends Service {
             }
         } else if (ACTION_INSTALL_UPDATE.equals(intent.getAction())) {
             String downloadId = intent.getStringExtra(EXTRA_DOWNLOAD_ID);
-            Update update = mUpdaterController.getUpdate(downloadId);
+            Update update = downloadId != null ? mUpdaterController.getUpdate(downloadId) : null;
             if (update == null) {
                 Log.e(TAG, "Update not found: " + downloadId);
                 return START_NOT_STICKY;
@@ -202,10 +202,24 @@ public class UpdaterService extends Service {
                 Log.e(TAG, "Update blocked: " + downloadId);
                 return START_NOT_STICKY;
             }
+            if (mUpdaterController.isInstallingUpdate() ||
+                    mUpdaterController.isVerifyingUpdate(downloadId)) {
+                Log.w(TAG, "Not installing " + downloadId + ": busy");
+                return START_NOT_STICKY;
+            }
             boolean canStreamUpdate = InstallUtils.canStreamUpdate(update,
                     mUserPreferencesRepository.getStreamUpdatesBlocking());
-            if (!canStreamUpdate && !update.getStatus().hasVerifiedPackage()) {
-                throw new IllegalArgumentException(update.getDownloadId() + " is not verified");
+            if (!canStreamUpdate && !(update.getStatus().hasVerifiedPackage() &&
+                    update.hasFullyDownloadedPackage())) {
+                // e.g. the package was deleted after it was verified
+                Log.e(TAG, downloadId + " has no verified package (" + update.getStatus()
+                        + ", " + update.getFile() + ")");
+                mUpdaterController.setUpdate(downloadId, update.toBuilder()
+                        .setStatus(UpdateStatus.INSTALLATION_FAILED)
+                        .setInstallFailure(InstallFailure.PREPARE)
+                        .build());
+                mUpdaterController.notifyUpdateChange(downloadId);
+                return START_NOT_STICKY;
             }
             try {
                 if (canStreamUpdate || new OtaMetadataParser(update.getFile()).isABUpdate()) {
@@ -227,11 +241,16 @@ public class UpdaterService extends Service {
                             mUpdaterController);
                     installer.install(downloadId);
                 }
-            } catch (IOException | ServiceSpecificException e) {
+            } catch (IOException | RuntimeException e) {
                 Log.e(TAG, "Could not install update", e);
-                mUpdaterController.setUpdate(downloadId, mUpdaterController.getUpdate(downloadId)
-                        .withStatus(UpdateStatus.INSTALLATION_FAILED));
-                mUpdaterController.notifyUpdateChange(downloadId);
+                Update failed = mUpdaterController.getUpdate(downloadId);
+                if (failed != null) {
+                    mUpdaterController.setUpdate(downloadId, failed.toBuilder()
+                            .setStatus(UpdateStatus.INSTALLATION_FAILED)
+                            .setInstallFailure(InstallFailure.PREPARE)
+                            .build());
+                    mUpdaterController.notifyUpdateChange(downloadId);
+                }
             }
         } else if (ACTION_INSTALL_STOP.equals(intent.getAction())) {
             if (UpdateInstaller.isInstalling()) {
@@ -431,8 +450,7 @@ public class UpdaterService extends Service {
                 mNotificationBuilder.setTicker(text);
                 mNotificationBuilder.setOngoing(true);
                 mNotificationBuilder.setAutoCancel(false);
-                startForeground(NOTIFICATION_ID, mNotificationBuilder.build(),
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+                startForegroundSafely();
                 mNotificationManager.notify(NOTIFICATION_ID, mNotificationBuilder.build());
                 break;
             }
@@ -461,6 +479,10 @@ public class UpdaterService extends Service {
                 mNotificationBuilder.setSmallIcon(android.R.drawable.stat_sys_warning);
                 mNotificationBuilder.setProgress(0, 0, false);
                 String text = getString(R.string.installing_update_error);
+                if (update.getInstallFailure() != null) {
+                    text = getString(R.string.install_failed_reason,
+                            getString(update.getInstallFailure().getMessageRes()));
+                }
                 mNotificationBuilder.setContentText(text);
                 mNotificationBuilder.setTicker(text);
                 mNotificationBuilder.setOngoing(false);

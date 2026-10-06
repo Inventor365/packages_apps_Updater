@@ -22,6 +22,9 @@ class OtaMetadataParser @Throws(IOException::class) constructor(file: File) {
     val timestamp: Long
     val isABUpdate: Boolean
 
+    /** Devices the package is built for (ro.product.device values); empty if not stated. */
+    val preDevices: List<String>
+
     init {
         val zipFile = try {
             ZipFile(file)
@@ -36,6 +39,7 @@ class OtaMetadataParser @Throws(IOException::class) constructor(file: File) {
             sdkLevel = metadata.sdkLevel
             securityPatchLevel = metadata.securityPatchLevel
             timestamp = metadata.timestamp
+            preDevices = metadata.preDevices
 
             if (timestamp <= 0) {
                 throw IOException("OTA metadata of ${file.name} has no post-timestamp")
@@ -56,6 +60,7 @@ class OtaMetadataParser @Throws(IOException::class) constructor(file: File) {
         val sdkLevel: Int,
         val securityPatchLevel: String,
         val timestamp: Long,
+        val preDevices: List<String>,
     )
 
     companion object {
@@ -83,6 +88,7 @@ class OtaMetadataParser @Throws(IOException::class) constructor(file: File) {
                 sdkLevel = postcondition.sdkLevel.toInt(),
                 securityPatchLevel = postcondition.securityPatchLevel ?: "",
                 timestamp = postcondition.timestamp,
+                preDevices = metadata.precondition?.device?.filter { it.isNotBlank() }.orEmpty(),
             )
         }
 
@@ -102,6 +108,8 @@ class OtaMetadataParser @Throws(IOException::class) constructor(file: File) {
                 sdkLevel = values["post-sdk-level"]?.toIntOrNull() ?: 0,
                 securityPatchLevel = values["post-security-patch-level"] ?: "",
                 timestamp = values["post-timestamp"]?.toLongOrNull() ?: 0,
+                preDevices = values["pre-device"]?.split(',')?.map { it.trim() }
+                    ?.filter { it.isNotEmpty() }.orEmpty(),
             )
         }
     }

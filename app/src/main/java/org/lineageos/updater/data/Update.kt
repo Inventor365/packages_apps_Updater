@@ -5,6 +5,7 @@
 
 package org.lineageos.updater.data
 
+import org.lineageos.updater.util.InstallFailure
 import org.lineageos.updater.util.PackageVerifier
 import java.io.File
 
@@ -34,6 +35,8 @@ data class Update(
     val version: String = "",
     /** Why the last verification of this package failed. Not persisted. */
     val verificationFailure: PackageVerifier.Failure? = null,
+    /** Why the last install of this package failed. Not persisted. */
+    val installFailure: InstallFailure? = null,
 ) {
     fun withAvailableOnline(v: Boolean) = copy(isAvailableOnline = v)
     fun withDownloadId(v: String) = copy(downloadId = v)
@@ -53,6 +56,7 @@ data class Update(
     fun withType(v: String?) = copy(type = v)
     fun withVersion(v: String) = copy(version = v)
     fun withVerificationFailure(v: PackageVerifier.Failure?) = copy(verificationFailure = v)
+    fun withInstallFailure(v: InstallFailure?) = copy(installFailure = v)
 
     fun toBuilder() = Builder(this)
 
@@ -81,6 +85,7 @@ data class Update(
         private var type: String? = null,
         private var version: String = "",
         private var verificationFailure: PackageVerifier.Failure? = null,
+        private var installFailure: InstallFailure? = null,
     ) {
         constructor(update: Update) : this(
             update.isAvailableOnline, update.downloadId, update.downloadUrl,
@@ -89,7 +94,7 @@ data class Update(
             update.payloadMetadataOffset, update.payloadMetadataSize, update.payloadOffset,
             update.payloadSize, update.payloadPropertiesOffset, update.payloadPropertiesSize,
             update.progress, update.speed, update.status, update.timestamp, update.type,
-            update.version, update.verificationFailure,
+            update.version, update.verificationFailure, update.installFailure,
         )
 
         fun setAvailableOnline(v: Boolean) = apply { isAvailableOnline = v }
@@ -116,12 +121,13 @@ data class Update(
         fun setType(v: String?) = apply { type = v }
         fun setVersion(v: String) = apply { version = v }
         fun setVerificationFailure(v: PackageVerifier.Failure?) = apply { verificationFailure = v }
+        fun setInstallFailure(v: InstallFailure?) = apply { installFailure = v }
         fun build() = Update(
             isAvailableOnline, downloadId, downloadUrl, eta, file, fileSize,
             isFinalizing, installProgress, name, osPatchLevel, osSdkLevel, payloadMetadataOffset,
             payloadMetadataSize, payloadOffset, payloadSize, payloadPropertiesOffset,
             payloadPropertiesSize, progress, speed, status, timestamp, type, version,
-            verificationFailure,
+            verificationFailure, installFailure,
         )
     }
 

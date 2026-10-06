@@ -57,8 +57,13 @@ class PackageVerifierTest {
     private fun sha256(file: File) = MessageDigest.getInstance("SHA-256")
         .digest(file.readBytes()).joinToString("") { "%02x".format(it) }
 
-    private fun verify(file: File?, expectedSize: Long = 0, expectedSha256: String? = null) =
-        PackageVerifier.verify(file, expectedSize, expectedSha256, checkSignature = false)
+    private fun verify(
+        file: File?,
+        expectedSize: Long = 0,
+        expectedSha256: String? = null,
+        devices: Collection<String>? = null,
+    ) = PackageVerifier.verify(file, expectedSize, expectedSha256, checkSignature = false,
+        devices = devices)
 
     @Test
     fun completePackageWithMatchingHashIsVerified() {
@@ -131,12 +136,38 @@ class PackageVerifierTest {
     }
 
     @Test
+    fun packageForThisDeviceIsVerified() {
+        val file = otaZip(metadata = "$abMetadata\npre-device=peridot")
+        assertTrue(verify(file, devices = setOf("peridot")).isVerified)
+    }
+
+    @Test
+    fun packageForAnotherDeviceIsRejected() {
+        val file = otaZip(metadata = "$abMetadata\npre-device=marble")
+        val failure = verify(file, devices = setOf("peridot")).failure
+        assertEquals(Failure.WRONG_DEVICE, failure)
+        assertFalse(failure!!.keepsPackage)
+    }
+
+    @Test
+    fun anyListedDeviceMatches() {
+        val file = otaZip(metadata = "$abMetadata\npre-device=marble, peridot")
+        assertTrue(verify(file, devices = setOf("peridot", "peridot_global")).isVerified)
+    }
+
+    @Test
+    fun packageWithoutDeviceIsNotRejectedForIt() {
+        assertTrue(verify(otaZip(), devices = setOf("peridot")).isVerified)
+    }
+
+    @Test
     fun metadataIsReadWithoutInventingValues() {
         val metadata = OtaMetadataParser(otaZip())
         assertTrue(metadata.isABUpdate)
         assertEquals(1791120017L, metadata.timestamp)
         assertEquals(36, metadata.sdkLevel)
         assertEquals("2026-09-01", metadata.securityPatchLevel)
+        assertEquals(emptyList<String>(), metadata.preDevices)
     }
 
     @Test

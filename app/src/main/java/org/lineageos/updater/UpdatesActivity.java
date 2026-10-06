@@ -261,12 +261,19 @@ public class UpdatesActivity extends UpdatesScaffoldActivity implements UpdateIm
     }
 
     private void handleDownloadStatusChange(String downloadId) {
+        UpdaterController controller = UpdaterController.getInstance(this);
         if (Update.LOCAL_ID.equals(downloadId)) {
+            // Importing and verifying the local package report through the import dialog;
+            // installing it is reported like any other update
+            boolean importing = mAwaitingImportResult || controller.isImportingLocalUpdate() ||
+                    controller.isVerifyingUpdate(Update.LOCAL_ID);
             refreshImportState();
-            return;
+            if (importing) {
+                return;
+            }
         }
 
-        Update update = UpdaterController.getInstance(this).getUpdate(downloadId);
+        Update update = controller.getUpdate(downloadId);
         if (update == null) {
             return;
         }
@@ -283,6 +290,15 @@ public class UpdatesActivity extends UpdatesScaffoldActivity implements UpdateIm
                 break;
             case VERIFIED:
                 showToast(R.string.snack_download_verified, Toast.LENGTH_LONG);
+                break;
+            case INSTALLATION_FAILED:
+                new AlertDialog.Builder(this)
+                        .setTitle(R.string.update_failed_notification)
+                        .setMessage(update.getInstallFailure() != null
+                                ? update.getInstallFailure().getMessageRes()
+                                : R.string.install_error_generic)
+                        .setPositiveButton(android.R.string.ok, null)
+                        .show();
                 break;
         }
     }
