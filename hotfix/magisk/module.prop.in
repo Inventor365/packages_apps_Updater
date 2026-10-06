@@ -1,0 +1,6 @@
+id=lunaris_updater_hotfix
+name=Lunaris Updater @VERSION_NAME@
+version=@VERSION_NAME@
+versionCode=@VERSION_CODE@
+author=yuki
+description=Updater @VERSION_NAME@ for Lunaris peridot builds that predate it. On builds signed with the AOSP test keys it also trusts the Lunaris release key for OTAs. Removes itself once a system update brings this Updater. To undo it, remove the module rather than disabling it.
