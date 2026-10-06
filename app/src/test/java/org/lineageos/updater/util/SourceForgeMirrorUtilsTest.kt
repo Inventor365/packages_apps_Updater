@@ -34,20 +34,21 @@ class SourceForgeMirrorUtilsTest {
 
     @Test
     fun testGetMirrorCandidateUrls() {
-        val original = URL("https://master.dl.sourceforge.net/project/yukiverse/peridot.zip?viasf=1&fid=123&st=abc")
+        val original = URL("https://netix.dl.sourceforge.net/project/yukiverse/peridot.zip?viasf=1&fid=123&st=abc")
         val candidates = SourceForgeMirrorUtils.getMirrorCandidateUrls(original)
 
-        assertTrue(candidates.isNotEmpty())
-        // Candidate URLs should retain path and query parameters
+        // SourceForge's own pick comes first, then the regional mirrors
+        assertEquals(original, candidates.first())
+        assertTrue(candidates.size > 1)
+        // The signed path and query work on every mirror
         for (c in candidates) {
             assertEquals("/project/yukiverse/peridot.zip?viasf=1&fid=123&st=abc", c.file)
             assertTrue(c.host.endsWith(".dl.sourceforge.net"))
         }
-
-        // Check hosts include twds and master
         val hosts = candidates.map { it.host }
-        assertTrue(hosts.contains("twds.dl.sourceforge.net"))
-        assertTrue(hosts.contains("master.dl.sourceforge.net"))
+        assertEquals(hosts.distinct(), hosts)
+        // The SourceForge master is far slower than the mirrors
+        assertFalse(hosts.contains("master.dl.sourceforge.net"))
     }
 
     @Test
@@ -57,11 +58,8 @@ class SourceForgeMirrorUtilsTest {
     }
 
     @Test
-    fun testSelectFastestMirrorFallback() {
-        val c1 = URL("https://twds.dl.sourceforge.net/project/a/b.zip")
-        val c2 = URL("https://master.dl.sourceforge.net/project/a/b.zip")
-        val selected = SourceForgeMirrorUtils.selectFastestMirror(listOf(c1, c2))
-        assertNotNull(selected)
-        assertTrue(selected.host.endsWith(".dl.sourceforge.net"))
+    fun testOtherLinksAreKept() {
+        val github = URL("https://github.com/test/ota/releases/download/v1/ota.zip")
+        assertEquals(listOf(github), SourceForgeMirrorUtils.getMirrorCandidateUrls(github))
     }
 }
