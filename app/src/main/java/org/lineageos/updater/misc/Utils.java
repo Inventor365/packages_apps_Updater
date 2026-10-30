@@ -19,6 +19,7 @@ import org.lineageos.updater.data.Update;
 import org.lineageos.updater.data.source.local.UpdatesLocalDataSource;
 import org.lineageos.updater.data.source.local.UpdatesDatabase;
 import org.lineageos.updater.deviceinfo.DeviceInfoUtils;
+import org.lineageos.updater.download.PartialDownload;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -96,16 +97,23 @@ public class Utils {
         }
 
         // Ideally the database is empty when we get here
-        List<String> knownPaths = new ArrayList<>();
+        List<File> knownFiles = new ArrayList<>();
         UpdatesLocalDataSource db =
                 new UpdatesLocalDataSource(UpdatesDatabase.getInstance(context).updateDao());
         for (Update update : db.getUpdates()) {
             if (update.getFile() != null) {
-                knownPaths.add(update.getFile().getAbsolutePath());
+                knownFiles.add(update.getFile());
             }
         }
         for (File file : files) {
-            if (!knownPaths.contains(file.getAbsolutePath())) {
+            boolean belongsToKnown = false;
+            for (File known : knownFiles) {
+                if (PartialDownload.belongsTo(file, known)) {
+                    belongsToKnown = true;
+                    break;
+                }
+            }
+            if (!belongsToKnown) {
                 Log.d(TAG, "Deleting " + file.getAbsolutePath());
                 //noinspection ResultOfMethodCallIgnored
                 file.delete();
@@ -129,7 +137,7 @@ public class Utils {
         final File parent = file.getParentFile();
         for (int i = 1; i < Integer.MAX_VALUE; i++) {
             File newFile = new File(parent, name + "-" + i + extension);
-            if (!newFile.exists()) {
+            if (!PartialDownload.exists(newFile)) {
                 return newFile;
             }
         }

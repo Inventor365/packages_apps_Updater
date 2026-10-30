@@ -391,7 +391,7 @@ public class UpdaterController {
                 // Nothing is wrong with the bytes we have, there just aren't enough of them (or
                 // checking them was cut short). Keep them so the download can be resumed.
                 int progress = file != null && update.getFileSize() > 0
-                        ? Math.round(file.length() * 100f / update.getFileSize())
+                        ? Math.round(PartialDownload.downloadedBytes(file) * 100f / update.getFileSize())
                         : update.getProgress();
                 failed = update.toBuilder()
                         .setStatus(UpdateStatus.PAUSED_ERROR)
@@ -647,7 +647,8 @@ public class UpdaterController {
             }
             addDownloadClient(entry, downloadClient);
             setStatus(entry, UpdateStatus.STARTING,
-                    "resuming at " + file.length() + " of " + update.getFileSize() + " bytes");
+                    "resuming at " + PartialDownload.downloadedBytes(file) + " of "
+                            + update.getFileSize() + " bytes");
             notifyUpdateChange(downloadId);
             downloadClient.resume();
             mWakeLock.acquire();

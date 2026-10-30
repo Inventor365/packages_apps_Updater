@@ -192,6 +192,8 @@ class ParallelDownloadClientTest {
         assertArrayEquals(data, destination.readBytes())
         assertFalse(PartialDownload.dataFile(destination).exists())
         assertFalse(PartialDownload.mapFile(destination).exists())
+        assertFalse(PartialDownload.assembledFile(destination).exists())
+        assertTrue(PartialDownload.listPartFiles(destination).isEmpty())
         assertEquals(data.size.toLong(), result.lastBytes)
         assertEquals(data.size.toLong(), result.reportedSize.get())
     }
@@ -341,6 +343,42 @@ class ParallelDownloadClientTest {
         bytes[10] = (bytes[10] + 1).toByte()
         file.writeBytes(bytes)
         assertNull(PartialDownload.readMap(file))
+    }
+
+    @Test
+    fun repeatedPauseAndResumeWithCorruptedPartTailNeverCorruptsPackage() {
+        val data = data(8 * 1024 * 1024 + 777)
+        val slow = FileServer(data, rate = 2 * 1024 * 1024)
+        val destination = File(tmp.root, "ota.zip")
+        val first = Result()
+        val c = client(slow, destination, first)
+        c.start()
+        val deadline = System.currentTimeMillis() + 20_000
+        while (first.lastBytes < data.size / 3 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50)
+        }
+        c.cancel()
+        assertTrue(first.done.await(20, TimeUnit.SECONDS))
+        assertTrue(first.cancelled)
+
+        // Verify isolated .part.<id> files were created on disk (1DM/IDM style)
+        val partFiles = PartialDownload.listPartFiles(destination)
+        assertTrue("expected isolated .part.<id> files on disk", partFiles.isNotEmpty())
+
+        // Simulate a corrupted block and unverified trailing bytes in the first non-empty part file
+        val targetPart = partFiles.first { it.length() >= BLOCK }
+        val originalPartBytes = targetPart.readBytes()
+        val damaged = ByteArray(originalPartBytes.size + 12345)
+        System.arraycopy(originalPartBytes, 0, damaged, 0, originalPartBytes.size)
+        // Corrupt the last completed block in this part file + leave trailing garbage
+        damaged[(originalPartBytes.size - BLOCK.toInt() / 2)] =
+            (damaged[(originalPartBytes.size - BLOCK.toInt() / 2)] + 1).toByte()
+        targetPart.writeBytes(damaged)
+
+        val fast = FileServer(data)
+        val second = Result()
+        download(client(fast, destination, second), second, resume = true)
+        assertComplete(destination, data, second)
     }
 
     companion object {

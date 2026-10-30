@@ -24,16 +24,18 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Downloads a package over several connections at once, each fetching a different byte range.
+ * 1DM / IDM style multi-part parallel download client with SourceForge fast-mirror selection.
  *
- * Download servers, SourceForge mirrors in particular, cap the speed of each connection, so a
- * single stream stays slow however fast the network is. Here the package is split in blocks
- * (see [PartialDownload]); workers fetch runs of blocks from the fastest mirrors, move to a
- * better mirror when theirs falls behind, and split the largest unfinished run when they run
- * out of work. Finished blocks are recorded on disk, so a pause, a network error or the process
- * dying only costs the blocks that were in flight.
+ * The package is partitioned into independent parts (`<destination>.part.0`,
+ * `<destination>.part.1`, ...), each owned by at most one worker at a time. Workers fetch
+ * block-aligned ranges from the fastest mirrors, switch mirrors when theirs falls behind, and
+ * dynamically split the largest remaining part into a new `.part.<id>` file when they finish
+ * early.
  *
- * Servers without range support are downloaded in a single stream.
+ * Every block is CRC32-checksummed before being committed to its part file, and on pause/resume
+ * all existing part files are CRC32-verified and truncated to the last verified block boundary.
+ * Only when all parts are 100% complete are they merged and verified in order into
+ * `<destination>`.
  */
 class ParallelDownloadClient @JvmOverloads internal constructor(
     private val url: String,
@@ -48,7 +50,7 @@ class ParallelDownloadClient @JvmOverloads internal constructor(
     class Config(
         val connections: Int = 8,
         val blockSize: Long = PartialDownload.BLOCK_SIZE,
-        /** Blocks per request; a worker can change mirror between requests. */
+        /** Blocks per HTTP range request; a worker can switch to a faster mirror between requests. */
         val runBlocks: Int = 8,
         val probeBytes: Int = 256 * 1024,
         val probeTimeoutMs: Long = 4000,
@@ -133,8 +135,12 @@ class ParallelDownloadClient @JvmOverloads internal constructor(
 
     // Resolution -------------------------------------------------------------------------
 
-    private class Resolved(val url: URL, val total: Long, val ranges: Boolean,
-            val duplicates: List<URL>)
+    private class Resolved(
+        val url: URL,
+        val total: Long,
+        val ranges: Boolean,
+        val duplicates: List<URL>,
+    )
 
     private fun open(url: URL, range: String?) =
         (url.openConnection() as HttpURLConnection).apply {
@@ -188,12 +194,16 @@ class ParallelDownloadClient @JvmOverloads internal constructor(
         throw IOException("Too many redirects")
     }
 
-    private class ContentRange(val start: Long, val total: Long)
+    private class ContentRange(val start: Long, val end: Long, val total: Long)
 
     private fun contentRange(connection: HttpURLConnection): ContentRange? {
         val match = CONTENT_RANGE.matchEntire(connection.getHeaderField("Content-Range") ?: "")
             ?: return null
-        return ContentRange(match.groupValues[1].toLong(), match.groupValues[3].toLong())
+        return ContentRange(
+            match.groupValues[1].toLong(),
+            match.groupValues[2].toLong(),
+            match.groupValues[3].toLong(),
+        )
     }
 
     private fun duplicateLinks(connection: HttpURLConnection): List<URL> =
@@ -219,28 +229,67 @@ class ParallelDownloadClient @JvmOverloads internal constructor(
         return Session(resolved, map).run()
     }
 
-    /** The block map to continue from, set up so that the data file matches it. */
+    /**
+     * Prepares and verifies the block & part map to continue from, sanitizing on-disk part
+     * files so every marked-done block is CRC32-verified and any partial tail is truncated.
+     */
     private fun prepare(resume: Boolean, total: Long): PartialDownload.BlockMap {
-        val data = PartialDownload.dataFile(destination)
         val mapFile = PartialDownload.mapFile(destination)
         if (resume) {
-            val map = PartialDownload.readMap(mapFile)
-            if (map != null && map.total == total && map.blockSize == config.blockSize &&
-                    data.exists()) {
-                Log.i(TAG, "Resuming with ${map.done.cardinality()} of ${map.blockCount} blocks")
-                return map
+            val rawMap = PartialDownload.readMap(mapFile)
+            if (rawMap != null && rawMap.total == total && rawMap.blockSize == config.blockSize) {
+                val verified = PartialDownload.verifyAndSanitizeParts(destination, rawMap)
+                if (verified.parts.isNotEmpty()) {
+                    PartialDownload.writeMap(mapFile, verified)
+                    Log.i(
+                        TAG,
+                        "Resuming with ${verified.done.cardinality()} of ${verified.blockCount} " +
+                            "verified blocks across ${verified.parts.size} parts"
+                    )
+                    return verified
+                }
             }
             val legacyLength = destination.length()
-            if (!data.exists() && legacyLength in 1 until total && destination.renameTo(data)) {
+            val part0 = PartialDownload.partFile(destination, 0)
+            if (!part0.exists() && legacyLength in 1 until total && destination.renameTo(part0)) {
                 // Started by a sequential download: the file is a prefix of the package
-                val done = BitSet().apply { set(0, (legacyLength / config.blockSize).toInt()) }
-                Log.i(TAG, "Continuing a sequential download at $legacyLength bytes")
-                return PartialDownload.BlockMap(total, config.blockSize, done)
+                val fullBlocks = (legacyLength / config.blockSize).toInt()
+                val done = BitSet().apply { set(0, fullBlocks) }
+                val blockCount = ((total + config.blockSize - 1) / config.blockSize).toInt()
+                val rawLegacy = PartialDownload.BlockMap(
+                    total,
+                    config.blockSize,
+                    done,
+                    emptyMap(),
+                    listOf(PartialDownload.PartSpec(0, 0, blockCount)),
+                )
+                val verified = PartialDownload.verifyAndSanitizeParts(destination, rawLegacy)
+                PartialDownload.writeMap(mapFile, verified)
+                Log.i(TAG, "Continuing a sequential download at ${verified.doneBytes()} bytes")
+                return verified
             }
-            Log.w(TAG, "Nothing to resume from, starting over")
+            Log.w(TAG, "Nothing valid to resume from, starting over")
         }
         PartialDownload.delete(destination)
-        return PartialDownload.BlockMap(total, config.blockSize, BitSet())
+        return createInitialPartMap(total)
+    }
+
+    /** Partitions a fresh download into 1DM/IDM initial parts (`0 until numParts`). */
+    private fun createInitialPartMap(total: Long): PartialDownload.BlockMap {
+        val blockCount = ((total + config.blockSize - 1) / config.blockSize).toInt()
+        val numParts = min(max(1, config.connections), max(1, blockCount))
+        val baseBlocks = blockCount / numParts
+        val remainder = blockCount % numParts
+        val parts = ArrayList<PartialDownload.PartSpec>(numParts)
+        var cursor = 0
+        for (i in 0 until numParts) {
+            val count = baseBlocks + if (i < remainder) 1 else 0
+            if (count > 0) {
+                parts.add(PartialDownload.PartSpec(i, cursor, cursor + count))
+                cursor += count
+            }
+        }
+        return PartialDownload.BlockMap(total, config.blockSize, BitSet(), emptyMap(), parts)
     }
 
     /** For servers without ranges: one stream, from the start. */
@@ -306,12 +355,16 @@ class ParallelDownloadClient @JvmOverloads internal constructor(
             bytes.addAndGet(delta)
         }
 
+        fun set(value: Long) {
+            bytes.set(value)
+        }
+
         @Synchronized
         fun report(force: Boolean) {
             val now = System.nanoTime()
             if (!force && now - lastReport < REPORT_INTERVAL_NS) return
             lastReport = now
-            val current = if (total > 0) min(bytes.get(), total) else bytes.get()
+            val current = if (total > 0) min(max(0L, bytes.get()), total) else max(0L, bytes.get())
             val elapsed = now - sampleTime
             if (elapsed >= SPEED_SAMPLE_NS) {
                 val sample = (current - sampleBytes) * 1_000_000_000L / elapsed
@@ -346,27 +399,48 @@ class ParallelDownloadClient @JvmOverloads internal constructor(
         override fun toString() = url.host
     }
 
-    // Session ----------------------------------------------------------------------------
+    // Session (1DM / IDM By-Parts Engine) ------------------------------------------------
 
-    private class Run(start: Long, @Volatile var end: Long) {
+    /**
+     * Mutable state of one download part `<destination>.part.<id>` covering blocks
+     * `[startBlock, endBlock)`. Blocks `startBlock until currentBlock` are already written,
+     * CRC32-verified, and flushed to `<destination>.part.<id>`.
+     */
+    private class PartState(
+        val id: Int,
+        val startBlock: Int,
+        @Volatile var currentBlock: Int,
+        @Volatile var endBlock: Int,
+    ) {
         @Volatile
-        var position = start
+        var active = false
+
+        val isComplete: Boolean
+            get() = currentBlock >= endBlock
+
+        val remainingBlocks: Int
+            get() = max(0, endBlock - currentBlock)
+
+        fun toSpec() = PartialDownload.PartSpec(id, startBlock, endBlock)
     }
 
-    private inner class Session(resolved: Resolved, private val map: PartialDownload.BlockMap) {
-        private val total = map.total
-        private val data = PartialDownload.dataFile(destination)
+    private inner class Session(resolved: Resolved, initialMap: PartialDownload.BlockMap) {
+        private val total = initialMap.total
+        private val blockSize = initialMap.blockSize
+        private val blockCount = initialMap.blockCount
         private val mapFile = PartialDownload.mapFile(destination)
-        private val queue = ArrayDeque<Run>()
-        private val active = mutableSetOf<Run>()
         private val lock = Any()
-        private val progress = Progress(map.doneBytes(), total)
+        private val done = initialMap.done.clone() as BitSet
+        private val blockCrcs = LinkedHashMap<Int, Int>(initialMap.blockCrcs)
+        private val parts = ArrayList<PartState>()
+        private var nextPartId = 0
+        private val progress = Progress(initialMap.doneBytes(), total)
         private val mirrors: List<Mirror>
+
         @Volatile
         private var linkGeneration = 0
         private var linkRefreshes = 0
         private val refreshLock = Any()
-        private lateinit var channel: FileChannel
 
         init {
             val candidates = buildList {
@@ -376,73 +450,124 @@ class ParallelDownloadClient @JvmOverloads internal constructor(
             }.distinctBy { it.toString() }
             mirrors = candidates.map { Mirror(it) }
 
-            // Contiguous missing blocks, in runs of up to runBlocks
-            var block = map.done.nextClearBit(0)
-            while (block < map.blockCount) {
-                var end = block
-                while (end < map.blockCount && !map.done[end] && end - block < config.runBlocks) {
-                    end++
-                }
-                queue.addLast(Run(map.blockStart(block), map.blockEnd(end - 1)))
-                block = map.done.nextClearBit(end)
+            val specs = if (initialMap.parts.isNotEmpty()) {
+                initialMap.parts.sortedBy { it.startBlock }
+            } else {
+                createInitialPartMap(total).parts
             }
+            for (spec in specs) {
+                var cur = spec.startBlock
+                while (cur < spec.endBlock && done.get(cur)) {
+                    cur++
+                }
+                // Clear any non-contiguous bits after the first unfinished block in this part
+                if (cur < spec.endBlock) {
+                    done.clear(cur, spec.endBlock)
+                }
+                parts.add(PartState(spec.id, spec.startBlock, cur, spec.endBlock))
+                if (spec.id >= nextPartId) {
+                    nextPartId = spec.id + 1
+                }
+            }
+            progress.set(snapshotMap().doneBytes())
+        }
+
+        private fun snapshotMap(): PartialDownload.BlockMap = synchronized(lock) {
+            PartialDownload.BlockMap(
+                total,
+                blockSize,
+                done.clone() as BitSet,
+                LinkedHashMap(blockCrcs),
+                parts.sortedBy { it.startBlock }.map { it.toSpec() },
+            )
         }
 
         fun run(): Boolean {
-            if (map.isComplete() && data.length() >= total) {
-                return finish()
-            }
-            RandomAccessFile(data, "rw").use { file ->
-                channel = file.channel
-                probeMirrors()
-                val missing = map.blockCount - map.done.cardinality()
-                val workers = (0 until min(config.connections, max(1, missing)))
-                    .map { id -> Thread({ work(id) }, "UpdaterDownload-$id").also { it.start() } }
-                var lastSave = System.nanoTime()
-                try {
-                    while (workers.any { it.isAlive }) {
-                        Thread.sleep(REPORT_INTERVAL_MS)
-                        progress.report(false)
-                        if (System.nanoTime() - lastSave >= SAVE_INTERVAL_NS) {
-                            save()
-                            lastSave = System.nanoTime()
-                        }
+            // Save initial part layout so even an immediate pause can resume cleanly
+            save()
+
+            repeat(2) { attempt ->
+                if (!isAllComplete()) {
+                    if (attempt == 0) {
+                        probeMirrors()
                     }
-                } catch (e: InterruptedException) {
-                    // Cancelled; wait for the workers to stop writing
-                    cancelled.set(1)
-                    workers.forEach { it.join() }
-                } finally {
+                    val missingBlocks = synchronized(lock) { blockCount - done.cardinality() }
+                    val workerCount = min(config.connections, max(1, missingBlocks))
+                    val workers = (0 until workerCount).map { id ->
+                        Thread({ work(id) }, "UpdaterDownload-$id").also { it.start() }
+                    }
+                    var lastSave = System.nanoTime()
+                    try {
+                        while (workers.any { it.isAlive }) {
+                            Thread.sleep(REPORT_INTERVAL_MS)
+                            progress.report(false)
+                            if (System.nanoTime() - lastSave >= SAVE_INTERVAL_NS) {
+                                save()
+                                lastSave = System.nanoTime()
+                            }
+                        }
+                    } catch (e: InterruptedException) {
+                        // Cancelled; wait for the workers to finish or roll back their current block
+                        cancelled.set(1)
+                        workers.forEach { it.join() }
+                    } finally {
+                        save()
+                    }
+                }
+
+                if (isCancelled) return false
+                if (!isAllComplete()) {
+                    val finished = synchronized(lock) { done.cardinality() }
+                    Log.e(TAG, "Download stopped with $finished of $blockCount blocks")
+                    return false
+                }
+
+                try {
+                    val finalMap = snapshotMap()
+                    PartialDownload.assembleParts(destination, finalMap)
+                    progress.set(total)
+                    progress.report(true)
+                    return true
+                } catch (e: PartialDownload.CorruptPartException) {
+                    Log.w(TAG, "Corrupt part detected at block ${e.blockIndex}, re-fetching part", e)
+                    invalidateFromBlock(e.blockIndex)
                     save()
                 }
             }
-            if (isCancelled) return false
-            if (!map.isComplete()) {
-                Log.e(TAG, "Download stopped with ${map.done.cardinality()} of " +
-                        "${map.blockCount} blocks")
-                return false
-            }
-            progress.report(true)
-            return finish()
+            return false
         }
 
-        private fun finish(): Boolean {
-            RandomAccessFile(data, "rw").use { file ->
-                if (file.length() != total) file.setLength(total)
-                file.fd.sync()
-            }
-            if (!data.renameTo(destination)) throw IOException("Could not rename $data")
-            mapFile.delete()
-            return true
+        private fun isAllComplete(): Boolean = synchronized(lock) {
+            done.cardinality() == blockCount && parts.all { it.isComplete }
         }
 
-        /** Writes the map of finished blocks, after the blocks themselves reached the disk. */
+        /** Marks a corrupted part's blocks from [badBlock] onward as unfinished so it re-fetches. */
+        private fun invalidateFromBlock(badBlock: Int) = synchronized(lock) {
+            val part = parts.find { badBlock in it.startBlock until it.endBlock } ?: return@synchronized
+            for (b in badBlock until part.endBlock) {
+                done.clear(b)
+                blockCrcs.remove(b)
+            }
+            if (part.currentBlock > badBlock) {
+                part.currentBlock = badBlock
+            }
+            val pFile = PartialDownload.partFile(destination, part.id)
+            if (pFile.exists()) {
+                runCatching {
+                    RandomAccessFile(pFile, "rw").use { raf ->
+                        raf.setLength((badBlock - part.startBlock).toLong() * blockSize)
+                    }
+                }
+            }
+            progress.set(
+                PartialDownload.BlockMap(total, blockSize, done).doneBytes()
+            )
+        }
+
+        /** Writes the map of finished blocks and part ranges atomically to disk. */
         private fun save() {
-            val done = synchronized(lock) { map.done.clone() as BitSet }
             try {
-                if (channel.isOpen) channel.force(false)
-                PartialDownload.writeMap(mapFile,
-                    PartialDownload.BlockMap(total, map.blockSize, done))
+                PartialDownload.writeMap(mapFile, snapshotMap())
             } catch (e: IOException) {
                 Log.w(TAG, "Could not save download progress", e)
             }
@@ -467,7 +592,9 @@ class ParallelDownloadClient @JvmOverloads internal constructor(
         }
 
         private fun probe(mirror: Mirror, deadline: Long) {
-            val connection = open(mirror.url, "bytes=0-${config.probeBytes - 1}")
+            val probeEnd = min(total - 1, config.probeBytes.toLong() - 1)
+            if (probeEnd < 0) return
+            val connection = open(mirror.url, "bytes=0-$probeEnd")
             connection.connectTimeout = config.probeTimeoutMs.toInt()
             connection.readTimeout = config.probeTimeoutMs.toInt()
             connections += connection
@@ -477,6 +604,10 @@ class ParallelDownloadClient @JvmOverloads internal constructor(
                 if (connection.responseCode != HttpURLConnection.HTTP_PARTIAL ||
                         contentRange(connection)?.total != total) {
                     throw IOException("HTTP ${connection.responseCode}")
+                }
+                val contentType = connection.contentType?.lowercase().orEmpty()
+                if (contentType.startsWith("text/html")) {
+                    throw IOException("Mirror returned HTML instead of binary data")
                 }
                 connection.inputStream.use { input ->
                     val buffer = ByteArray(BUFFER_SIZE)
@@ -516,86 +647,123 @@ class ParallelDownloadClient @JvmOverloads internal constructor(
             return current
         }
 
-        private fun nextRun(): Run? = synchronized(lock) {
-            val run = queue.removeFirstOrNull() ?: steal() ?: return null
-            active += run
-            run
-        }
-
-        /** Splits the largest unfinished run, so idle workers help with the tail. */
-        private fun steal(): Run? {
-            val victim = active.maxByOrNull { it.end - it.position } ?: return null
-            val remaining = victim.end - victim.position
-            if (remaining < 2 * map.blockSize) return null
-            // On a block boundary, at least a block past where the victim is
-            val split = ((victim.position + remaining / 2 + map.blockSize - 1) / map.blockSize) *
-                    map.blockSize
-            if (split >= victim.end) return null
-            val stolen = Run(split, victim.end)
-            victim.end = split
-            return stolen
-        }
-
-        /** Puts back what is left of a run, from the start of its unfinished block. */
-        private fun requeue(run: Run) = synchronized(lock) {
-            active -= run
-            if (run.position >= run.end) return@synchronized
-            val start = run.position / map.blockSize * map.blockSize
-            if (start < run.end) {
-                // Bytes past the block start will be fetched again
-                progress.add(-(run.position - start))
-                queue.addFirst(Run(start, run.end))
+        /**
+         * Claims an inactive unfinished part, or dynamically splits the largest active part into
+         * a new `.part.<id>` file (1DM / IDM dynamic segmentation).
+         */
+        private fun acquirePart(): PartState? = synchronized(lock) {
+            val free = parts
+                .filter { !it.active && !it.isComplete }
+                .maxByOrNull { it.remainingBlocks }
+            if (free != null) {
+                free.active = true
+                return@synchronized free
             }
+
+            // Dynamic part splitting: split the active part with the most remaining blocks
+            val victim = parts
+                .filter { it.active && it.remainingBlocks >= 2 }
+                .maxByOrNull { it.remainingBlocks }
+                ?: return@synchronized null
+
+            // Leave at least 1 block past victim.currentBlock so the victim finishes its current
+            // in-flight block without waste, and hand the second half to the new part file.
+            val splitBlock = victim.currentBlock + max(1, victim.remainingBlocks / 2)
+            if (splitBlock >= victim.endBlock) return@synchronized null
+
+            val oldEnd = victim.endBlock
+            victim.endBlock = splitBlock
+            val newPart = PartState(
+                id = nextPartId++,
+                startBlock = splitBlock,
+                currentBlock = splitBlock,
+                endBlock = oldEnd,
+            ).apply { active = true }
+            parts.add(newPart)
+            newPart
         }
+
+        private fun releasePart(part: PartState) = synchronized(lock) {
+            part.active = false
+        }
+
+        private fun blockStart(block: Int): Long = block * blockSize
+
+        private fun blockEnd(block: Int): Long = min(total, (block + 1) * blockSize)
+
+        private fun blockLength(block: Int): Int = (blockEnd(block) - blockStart(block)).toInt()
 
         private fun work(worker: Int) {
             var mirror = pickMirror(null, worker)
             var failures = 0
             while (!isCancelled) {
-                val run = nextRun() ?: return
-                mirror = pickMirror(mirror, worker) ?: run {
-                    requeue(run)
-                    return
-                }
-                mirror.workers.incrementAndGet()
+                val part = acquirePart() ?: return
                 try {
-                    fetch(run, mirror)
-                    synchronized(lock) { active -= run }
-                    failures = 0
-                } catch (e: IOException) {
-                    requeue(run)
-                    if (isCancelled) return
-                    if (e is LinkExpiredException && refreshLinks(e.generation)) continue
-                    failures++
-                    if (mirror.failures.incrementAndGet() >= MIRROR_MAX_FAILURES &&
-                            mirrors.count { !it.dead } > 1) {
-                        Log.w(TAG, "Dropping mirror ${mirror.url.host}")
-                        mirror.dead = true
-                    }
-                    Log.w(TAG, "Worker $worker: ${mirror.url.host} failed ($failures): $e")
-                    if (failures >= config.maxWorkerFailures) {
-                        Log.e(TAG, "Worker $worker gives up")
-                        return
-                    }
-                    try {
-                        Thread.sleep(config.retryDelayMs * (1L shl min(failures - 1, 4)))
-                    } catch (_: InterruptedException) {
-                        return
+                    while (!isCancelled) {
+                        val hasMore = synchronized(lock) { part.currentBlock < part.endBlock }
+                        if (!hasMore) break
+
+                        mirror = pickMirror(mirror, worker) ?: return
+                        mirror.workers.incrementAndGet()
+                        try {
+                            fetchRun(part, mirror)
+                            failures = 0
+                        } catch (e: IOException) {
+                            if (isCancelled) return
+                            if (e is LinkExpiredException && refreshLinks(e.generation)) continue
+                            failures++
+                            if (mirror.failures.incrementAndGet() >= MIRROR_MAX_FAILURES &&
+                                    mirrors.count { !it.dead } > 1) {
+                                Log.w(TAG, "Dropping mirror ${mirror.url.host}")
+                                mirror.dead = true
+                            }
+                            Log.w(TAG, "Worker $worker: ${mirror.url.host} failed ($failures): $e")
+                            if (failures >= config.maxWorkerFailures) {
+                                Log.e(TAG, "Worker $worker gives up")
+                                return
+                            }
+                            try {
+                                Thread.sleep(config.retryDelayMs * (1L shl min(failures - 1, 4)))
+                            } catch (_: InterruptedException) {
+                                return
+                            }
+                        } finally {
+                            mirror.workers.decrementAndGet()
+                        }
                     }
                 } finally {
-                    mirror.workers.decrementAndGet()
+                    releasePart(part)
                 }
             }
         }
 
-        /** Downloads the rest of a run from a mirror, marking blocks done as they complete. */
-        private fun fetch(run: Run, mirror: Mirror) {
+        /**
+         * Downloads up to `config.runBlocks` blocks for [part] into its dedicated
+         * `<destination>.part.<part.id>` file.
+         *
+         * Each block is buffered in memory, CRC32-checksummed on completion, and written
+         * atomically at its block-aligned offset in `<destination>.part.<part.id>`. If interrupted
+         * or cut short mid-block, the uncommitted in-flight block is discarded and the part file
+         * is truncated to the exact last verified block boundary.
+         */
+        private fun fetchRun(part: PartState, mirror: Mirror) {
+            val (runStartBlock, requestedEndBlock) = synchronized(lock) {
+                val s = part.currentBlock
+                val e = min(part.endBlock, s + config.runBlocks)
+                s to e
+            }
+            if (runStartBlock >= requestedEndBlock) return
+
+            val rangeStartByte = blockStart(runStartBlock)
+            val rangeEndByte = blockEnd(requestedEndBlock - 1) - 1
             val generation = linkGeneration
-            val requestedEnd = run.end
-            val connection = open(mirror.url, "bytes=${run.position}-${requestedEnd - 1}")
+            val connection = open(mirror.url, "bytes=$rangeStartByte-$rangeEndByte")
             connections += connection
-            val start = System.nanoTime()
-            var bytes = 0L
+            val startTime = System.nanoTime()
+            var totalBytesCommitted = 0L
+            var inFlightBlockBytes = 0
+
+            val pFile = PartialDownload.partFile(destination, part.id)
             try {
                 val code = connection.responseCode
                 if (code == HttpURLConnection.HTTP_FORBIDDEN ||
@@ -603,48 +771,106 @@ class ParallelDownloadClient @JvmOverloads internal constructor(
                     throw LinkExpiredException(code, generation)
                 }
                 if (code != HttpURLConnection.HTTP_PARTIAL) throw IOException("HTTP $code")
+                val contentType = connection.contentType?.lowercase().orEmpty()
+                if (contentType.startsWith("text/html")) {
+                    throw IOException("Mirror ${mirror.url.host} returned HTML page")
+                }
                 val range = contentRange(connection)
-                if (range?.start != run.position || range.total != total) {
+                if (range?.start != rangeStartByte || range.total != total ||
+                        range.end < rangeEndByte) {
                     throw IOException("Unexpected range from ${mirror.url.host}")
                 }
-                connection.inputStream.use { input ->
-                    val buffer = ByteArray(BUFFER_SIZE)
-                    while (run.position < run.end) {
-                        if (isCancelled) throw CancelledException()
-                        val n = input.read(buffer, 0, min(buffer.size.toLong(),
-                            run.end - run.position).toInt())
-                        if (n < 0) throw IOException("Connection closed at ${run.position}")
-                        // The run may have been split meanwhile; never write past its end
-                        val length = min(n.toLong(), run.end - run.position).toInt()
-                        if (length <= 0) break
-                        writeFully(channel, buffer, length, run.position)
-                        val before = run.position
-                        run.position += length
-                        bytes += length
-                        progress.add(length.toLong())
-                        markDone(before, run.position)
+
+                RandomAccessFile(pFile, "rw").use { raf ->
+                    val channel = raf.channel
+                    val blockBuffer = ByteArray(blockSize.toInt())
+                    connection.inputStream.use { input ->
+                        var block = runStartBlock
+                        while (block < requestedEndBlock) {
+                            // Check if dynamic part splitting reduced part.endBlock
+                            val currentEndBlock = synchronized(lock) { part.endBlock }
+                            if (block >= currentEndBlock) break
+
+                            val expectedLen = blockLength(block)
+                            var offsetInBlock = 0
+                            while (offsetInBlock < expectedLen) {
+                                if (isCancelled) throw CancelledException()
+                                val toRead = min(BUFFER_SIZE, expectedLen - offsetInBlock)
+                                val n = input.read(blockBuffer, offsetInBlock, toRead)
+                                if (n < 0) {
+                                    throw IOException(
+                                        "Connection closed at block $block (+$offsetInBlock bytes)"
+                                    )
+                                }
+                                offsetInBlock += n
+                                inFlightBlockBytes += n
+                                progress.add(n.toLong())
+                            }
+
+                            // Re-check under lock that this block still belongs to this part
+                            // before committing it to `<destination>.part.<part.id>`
+                            val crc = PartialDownload.computeBlockCrc(blockBuffer, 0, expectedLen)
+                            val relOffset = (block - part.startBlock).toLong() * blockSize
+                            writeFully(channel, blockBuffer, expectedLen, relOffset)
+                            channel.force(false)
+
+                            val committed = synchronized(lock) {
+                                if (block < part.endBlock && part.currentBlock == block) {
+                                    blockCrcs[block] = crc
+                                    done.set(block)
+                                    part.currentBlock = block + 1
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            if (!committed) {
+                                // Part was split right at this block; roll back progress and stop
+                                progress.add(-inFlightBlockBytes.toLong())
+                                inFlightBlockBytes = 0
+                                val validPartBytes = synchronized(lock) {
+                                    (part.currentBlock - part.startBlock).toLong() * blockSize
+                                }
+                                raf.setLength(validPartBytes)
+                                break
+                            }
+
+                            inFlightBlockBytes = 0
+                            totalBytesCommitted += expectedLen
+                            block++
+                        }
                     }
                 }
-                mirror.record(bytes, System.nanoTime() - start)
+                mirror.record(totalBytesCommitted, System.nanoTime() - startTime)
             } catch (e: InterruptedIOException) {
                 if (isCancelled) throw CancelledException()
                 throw e
             } finally {
-                // A run cut short (by a split or an error) leaves an unread body; the
-                // connection can't be reused then
-                if (run.position < requestedEnd || isCancelled) connection.disconnect()
-                connections -= connection
-            }
-        }
-
-        /** Marks the blocks whose end the run just passed (runs start on block boundaries). */
-        private fun markDone(from: Long, to: Long) {
-            var block = (from / map.blockSize).toInt()
-            synchronized(lock) {
-                while (block < map.blockCount && map.blockEnd(block) <= to) {
-                    if (map.blockEnd(block) > from) map.done.set(block)
-                    block++
+                if (inFlightBlockBytes > 0) {
+                    progress.add(-inFlightBlockBytes.toLong())
+                    inFlightBlockBytes = 0
                 }
+                // Ensure the part file on disk never has trailing bytes beyond part.currentBlock
+                if (pFile.exists()) {
+                    runCatching {
+                        val validBytes = synchronized(lock) {
+                            val verifiedBlocks = part.currentBlock - part.startBlock
+                            if (part.currentBlock == blockCount && verifiedBlocks > 0) {
+                                blockEnd(blockCount - 1) - blockStart(part.startBlock)
+                            } else {
+                                verifiedBlocks.toLong() * blockSize
+                            }
+                        }
+                        RandomAccessFile(pFile, "rw").use { raf ->
+                            if (raf.length() != validBytes) {
+                                raf.setLength(validBytes)
+                            }
+                        }
+                    }
+                }
+                val fullyRead = synchronized(lock) { part.currentBlock >= requestedEndBlock }
+                if (!fullyRead || isCancelled) connection.disconnect()
+                connections -= connection
             }
         }
 
@@ -665,8 +891,12 @@ class ParallelDownloadClient @JvmOverloads internal constructor(
             Log.i(TAG, "Refreshed the download link")
             for (mirror in mirrors) {
                 if (mirror.url.path == fresh.url.path) {
-                    mirror.url = URL(mirror.url.protocol, mirror.url.host, mirror.url.port,
-                        fresh.url.file)
+                    mirror.url = URL(
+                        mirror.url.protocol,
+                        mirror.url.host,
+                        mirror.url.port,
+                        fresh.url.file,
+                    )
                     mirror.failures.set(0)
                 }
             }
@@ -695,8 +925,10 @@ class ParallelDownloadClient @JvmOverloads internal constructor(
         private const val SWITCH_SHARE = 0.35
 
         private val CONTENT_RANGE = Regex("""bytes (\d+)-(\d+)/(\d+)""")
-        private val DUPLICATE_LINK = Regex("""<([^>]+)>\s*;\s*rel=duplicate""",
-            RegexOption.IGNORE_CASE)
+        private val DUPLICATE_LINK = Regex(
+            """<([^>]+)>\s*;\s*rel=duplicate""",
+            RegexOption.IGNORE_CASE,
+        )
 
         // Only one download may write a destination at a time
         private val writers = ConcurrentHashMap<String, Thread>()
