@@ -13,7 +13,7 @@ data class DeviceMetadata(
     val paypal: String = DEFAULT_PAYPAL,
 ) {
     companion object {
-        const val DEFAULT_TELEGRAM = "https://t.me/lunaris_hub"
+        const val DEFAULT_TELEGRAM = "https://t.me/+aVq_TSmHq0FhY2Y1"
         const val DEFAULT_PAYPAL = "https://paypal.me/ghosuto007"
     }
 }

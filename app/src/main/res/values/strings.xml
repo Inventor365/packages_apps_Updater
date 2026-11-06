@@ -217,7 +217,7 @@
     <string name="local_update_name">Local update</string>
 
     <!-- Updater -->
-    <string name="updater_link_telegram">Telegram</string>
+    <string name="updater_link_telegram">Yukiverse</string>
     <string name="updater_link_donate">Donate</string>
     <string name="updater_link_forum">Forum</string>
     <string name="updater_build_unofficial">Unofficial</string>
